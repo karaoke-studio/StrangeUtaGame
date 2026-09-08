@@ -283,6 +283,26 @@ class NicokaraExporter(BaseExporter):
         if not sentence.has_timetags or not sentence.characters:
             return sentence.text, prev_singer_id
 
+        # 行末无时间戳的空白无意义：从数据结构判定——自末字符向前，
+        # 连续的「无任何时间戳（起始 + 停顿释放均无）且去变体选择符后
+        # 纯空白」的字符构成行末尾巴，文本输出时跳过（半角/全角均适用；
+        # round-trip 中原文行末排版空格丢失属可接受差异）。自带时间戳的
+        # 空格（如纯空格停顿行 `[ts1] [ts2]`、只标停顿释放的空格）不构成
+        # 尾巴，完整保留。行中间的空格不受影响。
+        trailing_skip: Set[int] = set()
+        for j in range(len(sentence.characters) - 1, -1, -1):
+            ch_j = sentence.characters[j]
+            if (
+                not ch_j.global_timestamps
+                and ch_j.global_sentence_end_ts is None
+                and not strip_variation_selectors(ch_j.char).strip()
+            ):
+                trailing_skip.add(j)
+            else:
+                break
+        # 有效行末下标（跳过尾巴后的最后一个字符）；全空白行无有效字符
+        effective_last_idx = len(sentence.characters) - 1 - len(trailing_skip)
+
         parts: List[str] = []
 
         for i, ch in enumerate(sentence.characters):
@@ -316,6 +336,12 @@ class NicokaraExporter(BaseExporter):
                 if singer_name:
                     parts.append(f"【{singer_name}】")
 
+            # 行末尾巴的无时间戳空白：演唱者追踪仍照常进行（空白块切换
+            # 演唱者时上面已静默更新 prev_singer_id，与解析器的
+            # 「末字符 singer 继承」语义对齐），只跳过其文本/时间戳输出。
+            if i in trailing_skip:
+                continue
+
             # 过滤变体选择符：纯变体选择符字符整体跳过（含时间戳），
             # 非纯变体选择符则移除尾随的选择符后输出
             cleaned_char = strip_variation_selectors(ch.char)
@@ -333,9 +359,11 @@ class NicokaraExporter(BaseExporter):
             # "演唱停顿"（is_sentence_end，命名遗留，真实语义是
             # "演唱时的呼吸/停顿"），需要在该字符之后立即输出
             # 一个停顿释放 ts，形成 [ts前]字[ts后] 的双时间戳结构。
+            # 行尾判定相对「有效行末」——行末尾巴的无时间戳空格
+            # 不把停顿点挤成"句中"，避免同一释放 ts 输出两次。
             # 这与"连词"无关，连词信息仅在 @RubyN 中体现。
             if (
-                i < len(sentence.characters) - 1
+                i < effective_last_idx
                 and ch.is_sentence_end
                 and ch.global_sentence_end_ts is not None
             ):
@@ -345,16 +373,21 @@ class NicokaraExporter(BaseExporter):
                 if singer_ids is None or eff in singer_ids:
                     parts.append(_format_nicokara_ts(ch.global_sentence_end_ts))
 
-        # 行末结束时间戳（最后一个字符的 sentence-end checkpoint）
-        if sentence.characters:
-            last_char = sentence.characters[-1]
+        # 行末结束时间戳（有效行末字符的 sentence-end checkpoint）。
+        # 跳过行末尾巴的空白字符，避免因末字符是无时间戳空格而丢失
+        # 整行的释放时间戳；其余字符（含无时间戳标点）仍按原语义
+        # 作为行末字符参与判定。
+        if 0 <= effective_last_idx < len(sentence.characters):
+            last_char = sentence.characters[effective_last_idx]
             if (
                 last_char.is_sentence_end
                 and last_char.global_sentence_end_ts is not None
             ):
                 # 演唱者过滤：只有该字符属于选定演唱者时才输出
                 eff = self._normalize_singer_id(
-                    last_char.singer_id or sentence.singer_id, default_singer_id, known_singer_ids
+                    last_char.singer_id or sentence.singer_id,
+                    default_singer_id,
+                    known_singer_ids,
                 )
                 if singer_ids is None or eff in singer_ids:
                     parts.append(_format_nicokara_ts(last_char.global_sentence_end_ts))

@@ -554,6 +554,164 @@ class TestNicokaraExporter:
         finally:
             os.unlink(temp_path)
 
+    def test_export_strips_trailing_untagged_whitespace(self):
+        """行末无时间戳空格不导出，行末释放 ts 紧跟最后一个有效字符"""
+        project = Project()
+        singer = project.singers[0]
+        # 歌 + 行末悬挂半角空格 + 全角空格（均无时间戳）
+        sentence = Sentence.from_text("あ \u3000", singer.id)
+        sentence.characters[0].add_timestamp(1000, checkpoint_idx=0)
+        sentence.characters[0].is_sentence_end = True
+        sentence.characters[0].set_sentence_end_ts(2000)
+        project.add_sentence(sentence)
+
+        exporter = NicokaraExporter()
+
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".lrc", delete=False, encoding="utf-8"
+        ) as f:
+            temp_path = f.name
+
+        try:
+            exporter.export(project, temp_path)
+
+            with open(temp_path, "r", encoding="utf-8") as f:
+                content = f.read()
+
+            # 行末空格被剥掉，释放时间戳仍输出且紧跟「あ」
+            assert "[00:01:00]あ[00:02:00]" in content
+            assert "あ " not in content
+            assert "　" not in content
+        finally:
+            os.unlink(temp_path)
+
+    def test_export_keeps_midline_whitespace(self):
+        """行中间的空格（含全角）不受行末剥离影响"""
+        project = Project()
+        singer = project.singers[0]
+        sentence = Sentence.from_text("あ\u3000い ", singer.id)
+        sentence.characters[0].add_timestamp(1000, checkpoint_idx=0)
+        sentence.characters[2].add_timestamp(1500, checkpoint_idx=0)
+        project.add_sentence(sentence)
+
+        exporter = NicokaraExporter()
+
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".lrc", delete=False, encoding="utf-8"
+        ) as f:
+            temp_path = f.name
+
+        try:
+            exporter.export(project, temp_path)
+
+            with open(temp_path, "r", encoding="utf-8") as f:
+                content = f.read()
+
+            # 行中全角空格保留；行末无 ts 半角空格被剥
+            assert "[00:01:00]あ　[00:01:50]い" in content
+            assert "い " not in content
+        finally:
+            os.unlink(temp_path)
+
+    def test_export_keeps_timestamped_trailing_space(self):
+        """带时间戳的行末空格不剥（纯空格停顿行 [ts1] [ts2] 语义）"""
+        project = Project()
+        singer = project.singers[0]
+        sentence = Sentence.from_text("あ ", singer.id)
+        sentence.characters[0].add_timestamp(1000, checkpoint_idx=0)
+        sentence.characters[1].add_timestamp(2000, checkpoint_idx=0)
+        sentence.characters[1].is_sentence_end = True
+        sentence.characters[1].set_sentence_end_ts(3000)
+        project.add_sentence(sentence)
+
+        exporter = NicokaraExporter()
+
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".lrc", delete=False, encoding="utf-8"
+        ) as f:
+            temp_path = f.name
+
+        try:
+            exporter.export(project, temp_path)
+
+            with open(temp_path, "r", encoding="utf-8") as f:
+                content = f.read()
+
+            # 空格自带起始 ts：不剥，连同其行末释放 ts 一起输出
+            assert "[00:01:00]あ[00:02:00] [00:03:00]" in content
+        finally:
+            os.unlink(temp_path)
+
+    def test_export_keeps_trailing_space_with_pause_ts_only(self):
+        """只带停顿释放 ts（无起始 ts）的行末空格不剥"""
+        project = Project()
+        singer = project.singers[0]
+        sentence = Sentence.from_text("あ ", singer.id)
+        sentence.characters[0].add_timestamp(1000, checkpoint_idx=0)
+        sentence.characters[1].is_sentence_end = True
+        sentence.characters[1].set_sentence_end_ts(3000)
+        project.add_sentence(sentence)
+
+        exporter = NicokaraExporter()
+
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".lrc", delete=False, encoding="utf-8"
+        ) as f:
+            temp_path = f.name
+
+        try:
+            exporter.export(project, temp_path)
+
+            with open(temp_path, "r", encoding="utf-8") as f:
+                content = f.read()
+
+            # 空格虽无起始 ts，但有停顿释放 ts：保留空格及其释放时间戳
+            assert "[00:01:00]あ [00:03:00]" in content
+        finally:
+            os.unlink(temp_path)
+
+    def test_singer_inheritance_through_trailing_space(self):
+        """行末空格块切换演唱者时静默追踪，下一行不再插重复标签"""
+        project = Project()
+        singer_a = project.singers[0]
+        singer_a.name = "A"
+        singer_b = Singer(name="B", color="#00FF00")
+        project.add_singer(singer_b)
+
+        s1 = Sentence.from_text("あ ", singer_a.id)
+        s1.characters[0].add_timestamp(1000)
+        s1.characters[1].singer_id = singer_b.id  # 行末空格属于 B
+        project.add_sentence(s1)
+
+        s2 = Sentence.from_text("い", singer_b.id)
+        s2.characters[0].add_timestamp(2000)
+        project.add_sentence(s2)
+
+        exporter = NicokaraExporter()
+
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".lrc", delete=False, encoding="utf-8"
+        ) as f:
+            temp_path = f.name
+
+        try:
+            exporter.export(
+                project, temp_path,
+                singer_ids=None,
+                insert_singer_tags=True,
+                singer_map={singer_a.id: "A", singer_b.id: "B"},
+            )
+
+            with open(temp_path, "r", encoding="utf-8") as f:
+                content = f.read()
+
+            # 行末无时间戳空格被剥；B 的空白块不插标签但更新继承，
+            # 第二行继承 B（与解析器「末字符 singer 继承」一致），无重复标签
+            assert "[00:01:00]あ" in content
+            assert "【B】" not in content
+        finally:
+            os.unlink(temp_path)
+
     def test_export_file_extension(self):
         """测试文件扩展名为 .lrc"""
         exporter = NicokaraExporter()
