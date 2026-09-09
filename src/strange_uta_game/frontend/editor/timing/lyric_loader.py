@@ -31,6 +31,7 @@ from strange_uta_game.backend.infrastructure.parsers.inline_format import (
 )
 from strange_uta_game.backend.infrastructure.parsers.kasugamuki_format import (
     is_kasugamuki_content,
+    krl_role_names,
     sentences_from_kasugamuki,
 )
 from strange_uta_game.backend.infrastructure.parsers.text_splitter import (
@@ -487,12 +488,35 @@ def parse_lyric_content(
     if fmt == "krl":
         if progress_cb:
             progress_cb(_tr("正在解析 Kirakara 格式..."))
-        sentences = sentences_from_kasugamuki(content, default_singer_id)
+        # 【角色名】 标签 → Singer.id：优先匹配已有同名 singer，否则新建
+        # （合唱标签如 miku+rin 作为一个整体名处理）
+        singer_colors = [
+            "#FF6B6B", "#4ECDC4", "#45B7D1", "#FFA07A", "#98D8C8",
+            "#C9B1FF", "#F7DC6F", "#82E0AA", "#F1948A", "#85C1E9",
+        ]
+        singer_name_to_id: dict = {}
+        for idx, name in enumerate(krl_role_names(content)):
+            existing_id = None
+            if project_singers:
+                for s in project_singers:
+                    if s.name == name:
+                        existing_id = s.id
+                        break
+            if existing_id:
+                singer_name_to_id[name] = existing_id
+            else:
+                color = singer_colors[idx % len(singer_colors)]
+                new_singer = Singer(name=name, color=color, is_default=False)
+                singer_name_to_id[name] = new_singer.id
+                new_singers.append(new_singer)
+        sentences = sentences_from_kasugamuki(
+            content, default_singer_id, name_to_singer_id=singer_name_to_id
+        )
         # 春日向/KRL 自带注音与逐字时间轴 → 交由上层弹「保留原有注音」三选一
         return (
             _apply_compensation(sentences),
             False,
-            [],
+            new_singers,
             {"format": "krl", "prompt_ruby_choice": True},
         )
 

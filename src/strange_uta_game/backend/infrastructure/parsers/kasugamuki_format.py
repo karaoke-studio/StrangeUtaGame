@@ -37,6 +37,9 @@ _LONG_VOWEL = set("ー")
 
 _KRL_TIMESTAMP_RE = re.compile(r"\[(\d{1,3}:\d{2}:\d{2,3})\]")
 _KRL_CONFIG_START_RE = re.compile(r"\A\ufeff?\s*config\s*\{", re.IGNORECASE)
+# 行首角色标签：【@角色名】，`+` 连接表示合唱（如 【@miku+rin】）。
+# 标签不属于歌词正文；未标注的行沿用上一个角色。
+_KRL_ROLE_TAG_RE = re.compile(r"\A\s*【@([^【】\r\n]+)】")
 
 
 def strip_krl_config(content: str) -> str:
@@ -213,15 +216,45 @@ def sentence_from_kasugamuki(line: str, singer_id: str) -> Sentence:
     return Sentence(singer_id=singer_id, characters=characters)
 
 
-def sentences_from_kasugamuki(content: str, singer_id: str) -> List[Sentence]:
-    """Parse KRL text, ignoring an optional foreign-exporter config block."""
+def krl_role_names(content: str) -> List[str]:
+    """Collect distinct KRL role-tag names in file order (duet labels intact)."""
+    names: List[str] = []
+    for line in strip_krl_config(content).splitlines():
+        match = _KRL_ROLE_TAG_RE.match(line)
+        if match is None:
+            continue
+        name = match.group(1).strip()
+        if name and name not in names:
+            names.append(name)
+    return names
+
+
+def sentences_from_kasugamuki(
+    content: str,
+    singer_id: str,
+    name_to_singer_id: Optional[Dict[str, str]] = None,
+) -> List[Sentence]:
+    """Parse KRL text, ignoring an optional foreign-exporter config block.
+
+    Leading ``【角色名】`` role tags are metadata, not lyric text: they are
+    stripped from the line and, when ``name_to_singer_id`` provides a mapping,
+    the line's singer is switched accordingly (duet labels like ``miku+rin``
+    map as one name).  Lines without a tag inherit the previous line's role.
+    """
     body = strip_krl_config(content)
     if not body:
         return []
-    return [
-        sentence_from_kasugamuki(line, singer_id)
-        for line in body.splitlines()
-    ]
+    sentences: List[Sentence] = []
+    current_singer = singer_id
+    for line in body.splitlines():
+        match = _KRL_ROLE_TAG_RE.match(line)
+        if match is not None:
+            name = match.group(1).strip()
+            line = line[match.end() :]
+            if name and name_to_singer_id and name in name_to_singer_id:
+                current_singer = name_to_singer_id[name]
+        sentences.append(sentence_from_kasugamuki(line, current_singer))
+    return sentences
 
 
 def _split_kana_moras(text: str) -> List[str]:

@@ -5,10 +5,12 @@ from strange_uta_game.backend.application.project_import_service import (
 )
 from strange_uta_game.backend.infrastructure.parsers.kasugamuki_format import (
     is_kasugamuki_content,
+    krl_role_names,
     sentences_from_kasugamuki,
     sentences_to_kasugamuki,
     strip_krl_config,
 )
+from strange_uta_game.backend.domain import Singer
 from strange_uta_game.frontend.editor.timing.lyric_loader import (
     detect_lyric_format,
     parse_lyric_content,
@@ -56,6 +58,70 @@ def test_parse_krl_pronunciation_romaji_timing_and_line_release():
     assert [part.text for part in seconds.ruby.parts] == ["びょ", "う"]
     assert seconds.timestamps == [11700, 11810]
     assert sentences[1].characters[-1].sentence_end_ts == 12690
+
+
+def test_parse_krl_role_tags_stripped_and_switch_singer():
+    """【@角色名】 是元数据：剥离出歌词正文，未标注行沿用上一角色。"""
+    content = (
+        "【@miku】{そ|>[00:13:18]so}{れ|>[00:13:38]re}\n"
+        "【@rin】{そ|>[01:27:59]so}\n"
+        "{れ|>[01:27:77]re}\n"
+    )
+
+    assert krl_role_names(content) == ["miku", "rin"]
+    sentences = sentences_from_kasugamuki(
+        content, SINGER_ID, name_to_singer_id={"miku": "singer-m", "rin": "singer-r"}
+    )
+
+    assert [sentence.text for sentence in sentences] == ["それ", "そ", "れ"]
+    assert [sentence.singer_id for sentence in sentences] == [
+        "singer-m", "singer-r", "singer-r",
+    ]
+    # 无映射时标签同样剥离，不泄漏进歌词正文
+    fallback = sentences_from_kasugamuki(content, SINGER_ID)
+    assert [sentence.text for sentence in fallback] == ["それ", "そ", "れ"]
+    assert {sentence.singer_id for sentence in fallback} == {SINGER_ID}
+
+
+def test_parse_lyric_content_krl_role_tags_create_sug_singers():
+    content = (
+        "【@miku】{そ|>[00:13:18]so}\n"
+        "【@rin】{れ|>[00:13:38]re}\n"
+    )
+
+    sentences, is_nicokara, new_singers, metadata = parse_lyric_content(
+        content, SINGER_ID
+    )
+
+    assert not is_nicokara
+    assert metadata["format"] == "krl"
+    assert [s.name for s in new_singers] == ["miku", "rin"]
+    singer_ids = {s.name: s.id for s in new_singers}
+    assert [sentence.singer_id for sentence in sentences] == [
+        singer_ids["miku"], singer_ids["rin"],
+    ]
+    assert [sentence.text for sentence in sentences] == ["そ", "れ"]
+
+
+def test_parse_lyric_content_krl_role_tag_matches_existing_singer_by_name():
+    content = "【@初音ミク】{そ|>[00:13:18]so}\n"
+    existing = Singer(name="初音ミク", color="#45B7D1", is_default=False)
+
+    sentences, _, new_singers, _ = parse_lyric_content(
+        content, SINGER_ID, project_singers=[existing]
+    )
+
+    assert new_singers == []
+    assert sentences[0].singer_id == existing.id
+
+
+def test_parse_lyric_content_krl_duet_label_kept_as_single_name():
+    content = "【@miku+rin】{お|>[02:46:59]o}\n"
+
+    sentences, _, new_singers, _ = parse_lyric_content(content, SINGER_ID)
+
+    assert [s.name for s in new_singers] == ["miku+rin"]
+    assert sentences[0].singer_id == new_singers[0].id
 
 
 def test_parse_lyric_content_routes_krl_before_generic_inline_parser():
