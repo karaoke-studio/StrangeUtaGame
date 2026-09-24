@@ -10069,6 +10069,11 @@ Drag cards to reorder; edit offset/length/interval to generate a new SUG project
         <translation>Disable click-to-jump after delay (double-click unaffected)</translation>
     </message>
     <message>
+        <location filename="src/strange_uta_game/frontend/settings/sub_interfaces/timing.py" line="51" />
+        <source>关闭后由 Windows 缩放整个程序，可降低高分屏渲染开销，但画面会变模糊；重启软件后生效</source>
+        <translation>When off, Windows scales the entire app, reducing high-DPI rendering load at the cost of a blurrier image; takes effect after restart</translation>
+    </message>
+    <message>
         <location filename="src/strange_uta_game/frontend/settings/sub_interfaces/timing.py" line="126" />
         <source>单击或双击字符/节奏点时不再把目标行滚动到视口中央（光标仍会移动；播放自动滚动与键盘导航不受影响）</source>
         <translation>Single- or double-clicking a character/checkpoint no longer scrolls the target line to the viewport center (the cursor still moves; playback auto-scroll and keyboard navigation are unaffected)</translation>
@@ -10272,6 +10277,11 @@ Drag cards to reorder; edit offset/length/interval to generate a new SUG project
         <location filename="src/strange_uta_game/frontend/settings/sub_interfaces/timing.py" line="148" />
         <source>预览指引方式</source>
         <translation>Preview guide style</translation>
+    </message>
+    <message>
+        <location filename="src/strange_uta_game/frontend/settings/sub_interfaces/timing.py" line="50" />
+        <source>高分屏适配</source>
+        <translation>High-DPI scaling</translation>
     </message>
     <message>
         <location filename="src/strange_uta_game/frontend/settings/sub_interfaces/timing.py" line="176" />

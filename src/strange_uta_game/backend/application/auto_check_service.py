@@ -1313,16 +1313,6 @@ class AutoCheckService:
             if char.timestamps and check_counts[i] < len(char.timestamps) and not in_ruby_block_follower:
                 check_counts[i] = len(char.timestamps)
 
-            # 反向守卫：已持有时间戳的字符不得被重分析/注音变化凭空增加节奏点。
-            # 重分析把读音拆成更多 mora 时，新节奏点没有对应时间戳；若放任
-            # check_count 超过 len(timestamps)，该行会被 is_fully_timed 判为
-            # “未打轴”，而预览会把无 ts 的节奏点并入前一段走字，造成“预览正常、
-            # 导出报未打轴”的假警。这里把节奏点收口到已有时间戳的粒度（多余
-            # mora 由 set_check_count 并回相邻 part），需要更细的节奏点时用户
-            # 可手动增减节奏点后再打轴。
-            if char.timestamps and check_counts[i] > len(char.timestamps) and not in_ruby_block_follower:
-                check_counts[i] = len(char.timestamps)
-
             # 守卫：n3 加载已携带 sentence_end_ts 的字符必须保留
             if char.sentence_end_ts is not None:
                 is_sentence_end = True

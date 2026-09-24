@@ -209,6 +209,9 @@ class AppSettings:
         "ui": {
             "theme": "auto",
             "language": "auto",
+            # Windows 高分屏适配；关闭时进程按 96 DPI 绘制并由系统缩放整窗。
+            # DPI awareness 在 QApplication 创建时确定，因此修改后重启生效。
+            "high_dpi_scaling": True,
             # F2 注音编辑器：compact = 字符上方迷你浮窗，classic = 原有大窗口。
             "f2_ruby_editor_mode": "compact",
             # 应用界面字体；空串表示根据界面语言和平台自动选择。

@@ -94,6 +94,7 @@
   "ui": {
     "theme": "auto",
     "language": "auto",
+    "high_dpi_scaling": true,
     "f2_ruby_editor_mode": "compact",
     "main_font": "Microsoft YaHei",
     "ruby_font": "Microsoft YaHei",

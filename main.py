@@ -10,6 +10,20 @@ from pathlib import Path
 src_path = Path(__file__).parent / "src"
 sys.path.insert(0, str(src_path))
 
+# DPI awareness 必须在 QApplication 创建时确定。先读取纯数据设置，再为 Qt
+# 构造独立参数列表；原始 sys.argv 留给下方的文件关联打开逻辑使用。
+from strange_uta_game.frontend.dpi_policy import (
+    HIGH_DPI_SCALING_KEY,
+    build_qt_argv,
+)
+from strange_uta_game.frontend.settings.app_settings import AppSettings
+
+settings = AppSettings()
+_qt_argv = build_qt_argv(
+    sys.argv,
+    high_dpi_scaling=bool(settings.get(HIGH_DPI_SCALING_KEY, True)),
+)
+
 # 设置 Windows 任务栏图标（AppUserModelID）必须在 QApplication 创建之前调用
 if sys.platform == "win32":
     try:
@@ -26,7 +40,7 @@ from PyQt6.QtWidgets import QApplication
 from PyQt6.QtCore import Qt, QEvent
 from PyQt6.QtGui import QIcon
 
-# 启用 DPI 缩放
+# 高分屏开启时保留 Qt 6 的分数缩放；DPI Unaware 下比例为 1，此策略无副作用。
 QApplication.setHighDpiScaleFactorRoundingPolicy(
     Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
 )
@@ -56,7 +70,7 @@ class SUGApplication(QApplication):
 
 
 # 创建应用实例
-app = SUGApplication(sys.argv)
+app = SUGApplication(_qt_argv)
 
 # 所有弹窗都作为普通窗口显示：即使调用方使用 QDialog.exec() 等待返回值，
 # 也不禁用主窗口或其他弹窗，避免多个模态窗口互相争抢导致无法操作。
@@ -75,10 +89,6 @@ if not _icon_path.exists():
 
 # 初始化主题管理器（必须在创建主窗口之前）
 from strange_uta_game.frontend.theme import theme
-from strange_uta_game.frontend.settings.app_settings import AppSettings
-
-# 从配置文件读取主题设置并应用
-settings = AppSettings()
 
 # 闪屏早于 MainWindow 创建，因此先按设置准备应用字体；MainWindow 随后安装
 # translator 时会再次确认有效语言。这样启动阶段也不会短暂使用中文 UI 字体。

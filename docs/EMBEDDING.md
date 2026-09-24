@@ -183,10 +183,13 @@ class SettingsProvider(Protocol):
   出现"半亮半暗"崩坏画面。主题归宿主独占（host 通过 `theme_workbench`
   adapter 驱动同一个 SUG `theme` 单例）。
 
-**隐藏 UI**（`frontend/settings/sub_interfaces/about.py` / `ui_settings.py`，`provider is not None` 时）：
-- `tools_group`：ffmpeg 路径选择入口（宿主统一管理 ffmpeg）
-- `_path_card`：配置文件位置卡片（embedded 下配置走宿主，无文件目录概念）
-- `card_theme`：主题选择卡（embedded 下主题归宿主"界面"设置独占）
+**隐藏 UI**：
+- `tools_group`：ffmpeg 路径选择入口（宿主统一管理 ffmpeg；由 provider 判定）
+- `_path_card`：配置文件位置卡片（embedded 下配置走宿主，无文件目录概念；由 provider 判定）
+- `card_theme`：主题选择卡（embedded 下主题归宿主"界面"设置独占；由 provider 判定）
+- `card_high_dpi_scaling`：由显式 `embedded=True` 判定（旧调用兼容 provider
+  判定）。进程 DPI awareness 必须由宿主在创建 `QApplication` 前决定，
+  嵌入后的 SUG 不能独立切换
 
 **改走 provider**（不访问 standalone 文件）：
 - `load/save_dictionary`、`load/save_singer_presets`、`load/save_network_dictionary`（走 `load_extra/save_extra`）

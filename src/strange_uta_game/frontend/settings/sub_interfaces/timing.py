@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
+import sys
+from typing import Optional
+
 from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QFont
+from qfluentwidgets import FluentIcon as FIF
+from qfluentwidgets import PushButton, SettingCard, SettingCardGroup
+
+from strange_uta_game.frontend.dpi_policy import HIGH_DPI_SCALING_KEY
 from strange_uta_game.frontend.font_utils import ui_font
-from qfluentwidgets import FluentIcon as FIF, PushButton, SettingCard, SettingCardGroup
 
 from ..calibration_dialog import CalibrationDialog
 from ..cards import ComboSettingCard, SpinSettingCard, SwitchSettingCard
@@ -14,10 +19,14 @@ from .base import SubSettingInterface
 
 
 class TimingSubInterface(SubSettingInterface):
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, *, embedded: Optional[bool] = None):
         super().__init__(parent)
+        # None preserves compatibility for direct callers that historically
+        # identified embedded mode through AppSettings._provider.
+        self._embedded = embedded
         self._settings_ref = None
         self._calibration_dialog = None
+        self._high_dpi_setting_available = False
         self._init_ui()
 
     def _init_ui(self):
@@ -39,7 +48,24 @@ class TimingSubInterface(SubSettingInterface):
         self.card_ui_refresh_fps.set_item_sources(
             ["流畅（60 帧）", "低性能模式（30 帧）"]
         )
+        self.card_high_dpi_scaling = self._tr_register(
+            SwitchSettingCard(
+                FIF.ZOOM,
+                tr("高分屏适配"),
+                tr(
+                    "关闭后由 Windows 缩放整个程序，可降低高分屏渲染开销，"
+                    "但画面会变模糊；重启软件后生效"
+                ),
+                parent=g_performance,
+            ),
+            title_source="高分屏适配",
+            content_source=(
+                "关闭后由 Windows 缩放整个程序，可降低高分屏渲染开销，"
+                "但画面会变模糊；重启软件后生效"
+            ),
+        )
         g_performance.addSettingCard(self.card_ui_refresh_fps)
+        g_performance.addSettingCard(self.card_high_dpi_scaling)
         self.expandLayout.addWidget(g_performance)
 
         # ── 分组 2：时间补正 ──
@@ -225,6 +251,11 @@ class TimingSubInterface(SubSettingInterface):
         self.card_export_offset.value_changed.connect(self._notify_changed)
         self.card_timing_step.value_changed.connect(self._notify_changed)
         self.card_ui_refresh_fps.index_changed.connect(self._notify_changed)
+        # 启动期设置即时落盘，但不触发运行时 settings cascade；当前进程的
+        # DPI awareness 不可安全切换，下一次启动才会读取并应用。
+        self.card_high_dpi_scaling.checked_changed.connect(
+            self._on_high_dpi_scaling_changed
+        )
         self.card_waveform_tag_edit.checked_changed.connect(self._notify_changed)
         self.card_waveform_center_playhead.checked_changed.connect(self._notify_changed)
         self.card_waveform_tag_char.checked_changed.connect(self._notify_changed)
@@ -243,6 +274,18 @@ class TimingSubInterface(SubSettingInterface):
 
     def load_settings(self, s):
         self._settings_ref = s
+        embedded = (
+            getattr(s, "_provider", None) is not None
+            if self._embedded is None
+            else self._embedded
+        )
+        self._high_dpi_setting_available = (
+            sys.platform == "win32" and not embedded
+        )
+        self.card_high_dpi_scaling.setVisible(self._high_dpi_setting_available)
+        self.card_high_dpi_scaling.setChecked(
+            bool(s.get(HIGH_DPI_SCALING_KEY, True))
+        )
         self.card_offset.setValue(s.get("timing.tag_offset_ms", -230))
         self.card_speed_correction.setValue(s.get("timing.speed_correction", 80))
         self.card_export_offset.setValue(s.get("export.offset_ms", 0))
@@ -265,6 +308,11 @@ class TimingSubInterface(SubSettingInterface):
         self.card_keysound_style.setCurrentIndex(idx)
 
     def collect_settings(self, s):
+        if self._high_dpi_setting_available:
+            s.set(
+                HIGH_DPI_SCALING_KEY,
+                self.card_high_dpi_scaling.isChecked(),
+            )
         s.set("timing.tag_offset_ms", self.card_offset.value())
         s.set("timing.speed_correction", self.card_speed_correction.value())
         s.set("export.offset_ms", self.card_export_offset.value())
@@ -285,3 +333,13 @@ class TimingSubInterface(SubSettingInterface):
         s.set("timing.keysound_volume", self.card_keysound_volume.value())
         idx = self.card_keysound_style.currentIndex()
         s.set("timing.keysound_style", self._STYLE_KEYS[idx] if idx < len(self._STYLE_KEYS) else "default")
+
+    def _on_high_dpi_scaling_changed(self, checked: bool) -> None:
+        """持久化启动期 DPI 模式；实际切换留到下次启动。"""
+        if not self._high_dpi_setting_available or self._settings_ref is None:
+            return
+        value = bool(checked)
+        if bool(self._settings_ref.get(HIGH_DPI_SCALING_KEY, True)) == value:
+            return
+        self._settings_ref.set(HIGH_DPI_SCALING_KEY, value)
+        self._settings_ref.save()

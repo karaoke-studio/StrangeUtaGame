@@ -23,6 +23,7 @@ import json
 import os
 import sys
 from pathlib import Path
+from typing import Optional
 
 from PyQt6.QtCore import QEvent, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QKeyEvent
@@ -121,12 +122,23 @@ class SettingsInterface(ScrollArea):
     _SHORTCUT_ACTIONS = ShortcutSubInterface._SHORTCUT_ACTIONS
     _SHORTCUT_MODES   = ShortcutSubInterface._SHORTCUT_MODES
 
-    def __init__(self, parent=None, settings_provider=None):
+    def __init__(
+        self,
+        parent=None,
+        settings_provider=None,
+        *,
+        embedded: Optional[bool] = None,
+    ):
         super().__init__(parent)
         self._store = None
         self._settings_provider = settings_provider
         self._settings = AppSettings(provider=settings_provider)
-        self._embedded = settings_provider is not None
+        # MainWindow knows whether it is embedded even when the host does not
+        # provide a settings bridge. Keep provider inference as a compatibility
+        # fallback for older/direct SettingsInterface callers.
+        self._embedded = (
+            settings_provider is not None if embedded is None else bool(embedded)
+        )
         self._tab_config = [
             item for item in self.TAB_CONFIG
             if not (self._embedded and item[0] == "network")
@@ -226,7 +238,10 @@ class SettingsInterface(ScrollArea):
 
         # 第一批：创建子页面实例（分两次，每次让出事件循环）
         self.playbackInterface  = PlaybackSubInterface(self)
-        self.timingInterface    = TimingSubInterface(self)
+        self.timingInterface    = TimingSubInterface(
+            self,
+            embedded=self._embedded,
+        )
         self.autoSaveInterface  = AutoSaveSubInterface(self)
         self.autoCheckInterface = AutoCheckSubInterface(self)
         self.dictionaryInterface= DictionarySubInterface(self)

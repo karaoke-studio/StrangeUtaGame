@@ -1622,6 +1622,8 @@
   "性能": "Performance",
   "打轴界面刷新率": "Timing UI refresh rate",
   "流畅（60 帧）": "Smooth (60 fps)",
+  "高分屏适配": "High-DPI scaling",
+  "关闭后由 Windows 缩放整个程序，可降低高分屏渲染开销，但画面会变模糊；重启软件后生效": "When off, Windows scales the entire app, reducing high-DPI rendering load at the cost of a blurrier image; takes effect after restart",
   "自动对齐会把歌词标注对齐到人声；成功后覆盖全部时间戳，可在工具栏撤销一次恢复。结果仅供辅助参考，请务必人工校准后再使用。": "Auto alignment maps lyric readings onto the vocals; on success all timestamps are overwritten (one undo available from the toolbar). Results are for reference only - always calibrate them manually before use.",
   "已覆盖全部时间戳并写入工程（尚未保存，请按 Ctrl+S 落盘；可撤销一次恢复）。结果仅供辅助，请人工校准；和声/重叠人声段落务必人工复查！": "All timestamps were overwritten in the project (not saved yet - press Ctrl+S to persist; one undo available). Results are assistive only: calibrate manually, and always review harmony/overlapping-vocal sections!",
   "MPS（Apple 芯片）": "MPS (Apple silicon)",

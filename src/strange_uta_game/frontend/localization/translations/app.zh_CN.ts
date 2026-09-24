@@ -10070,6 +10070,11 @@ KS 来源的配置将优先覆盖同名设置。</translation>
         <translation>关闭单击字符/节奏点延迟后跳转到目标行的功能（双击跳转不受影响）</translation>
     </message>
     <message>
+        <location filename="src/strange_uta_game/frontend/settings/sub_interfaces/timing.py" line="51" />
+        <source>关闭后由 Windows 缩放整个程序，可降低高分屏渲染开销，但画面会变模糊；重启软件后生效</source>
+        <translation>关闭后由 Windows 缩放整个程序，可降低高分屏渲染开销，但画面会变模糊；重启软件后生效</translation>
+    </message>
+    <message>
         <location filename="src/strange_uta_game/frontend/settings/sub_interfaces/timing.py" line="126" />
         <source>单击或双击字符/节奏点时不再把目标行滚动到视口中央（光标仍会移动；播放自动滚动与键盘导航不受影响）</source>
         <translation>单击或双击字符/节奏点时不再把目标行滚动到视口中央（光标仍会移动；播放自动滚动与键盘导航不受影响）</translation>
@@ -10273,6 +10278,11 @@ KS 来源的配置将优先覆盖同名设置。</translation>
         <location filename="src/strange_uta_game/frontend/settings/sub_interfaces/timing.py" line="148" />
         <source>预览指引方式</source>
         <translation>预览指引方式</translation>
+    </message>
+    <message>
+        <location filename="src/strange_uta_game/frontend/settings/sub_interfaces/timing.py" line="50" />
+        <source>高分屏适配</source>
+        <translation>高分屏适配</translation>
     </message>
     <message>
         <location filename="src/strange_uta_game/frontend/settings/sub_interfaces/timing.py" line="176" />

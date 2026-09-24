@@ -682,7 +682,11 @@ class MainWindow(MSFluentWindow):
         self.rubyInterface.hide()  # 已废弃，仅保留与 Timing 共用的功能
 
         self._report_progress(77, self.tr("正在加载设置界面..."))
-        self.settingInterface = SettingsInterface(self, settings_provider=self._settings_provider)
+        self.settingInterface = SettingsInterface(
+            self,
+            settings_provider=self._settings_provider,
+            embedded=self._embedded,
+        )
         self.settingInterface.setObjectName("settingInterface")
 
         self._report_progress(82, self.tr("正在加载编辑视图..."))
