@@ -11,10 +11,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from PyQt6.QtCore import Qt, QThread
-from strange_uta_game.frontend.fluent_widgets import (
-    message_choice,
-    themed_get_open_file_name,
-)
+from PyQt6.QtWidgets import QFileDialog
+from strange_uta_game.frontend.fluent_widgets import message_choice
 from qfluentwidgets import InfoBar, InfoBarPosition, StateToolTip
 
 from strange_uta_game.backend.infrastructure.audio.video_converter import (
@@ -295,7 +293,7 @@ class FileLoader:
         if not self.check_unsaved_changes():
             return
         init_dir = self._store.working_dir if self._store else ""
-        path, _ = themed_get_open_file_name(
+        path, _ = QFileDialog.getOpenFileName(
             self._editor, self._editor.tr("打开项目"), init_dir,
             self._editor.tr("StrangeUtaGame 项目 (*.sug);;所有文件 (*.*)"),
         )
@@ -306,7 +304,7 @@ class FileLoader:
     def prompt_load_audio(self):
         """弹出文件选择框加载音频或视频"""
         init_dir = self._store.working_dir if self._store else ""
-        path, _ = themed_get_open_file_name(
+        path, _ = QFileDialog.getOpenFileName(
             self._editor, self._editor.tr("选择音频或视频文件"), init_dir,
             self._editor.tr("音频/视频文件 (*.mp3 *.wav *.flac *.ogg *.mp4 *.mkv *.m4a *.avi *.mov *.wmv *.flv *.webm *.m4v *.mpg *.mpeg *.ts *.3gp *.vob *.mts *.m2ts *.rm *.rmvb *.asf *.f4v *.ogv *.m4b *.aac *.wma *.opus *.ape *.ac3 *.dts);;所有文件 (*.*)"),
         )
@@ -332,7 +330,7 @@ class FileLoader:
         if self._project_has_lyrics() and not self.check_unsaved_changes():
             return
         init_dir = self._store.working_dir if self._store else ""
-        path, _ = themed_get_open_file_name(
+        path, _ = QFileDialog.getOpenFileName(
             self._editor, self._editor.tr("选择歌词文件"), init_dir,
             self._editor.tr("歌词文件 (*.lrc *.txt *.kra *.krl *.srt *.ass);;所有文件 (*.*)"),
         )

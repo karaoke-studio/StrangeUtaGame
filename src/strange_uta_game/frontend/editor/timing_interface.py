@@ -27,6 +27,7 @@ from PyQt6.QtGui import QDragEnterEvent, QDropEvent, QKeyEvent
 from PyQt6.QtWidgets import (
     QApplication,
     QDialog,
+    QFileDialog,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -80,7 +81,6 @@ from strange_uta_game.frontend.fluent_widgets import (
     message_choice,
     message_info,
     message_question,
-    themed_get_save_file_name,
 )
 
 from .line_interface import LineDetailDialog
@@ -2031,7 +2031,7 @@ class EditorInterface(QWidget):
 
         # 无正式保存路径 / 仍是临时项目 → 弹出另存为对话框
         suggested = store.suggested_save_path(".sug") if store else ""
-        path, _ = themed_get_save_file_name(
+        path, _ = QFileDialog.getSaveFileName(
             self, self.tr("保存项目"), suggested,
             self.tr("StrangeUtaGame 项目 (*.sug);;所有文件 (*.*)")
         )
@@ -2228,7 +2228,7 @@ class EditorInterface(QWidget):
 
         store = getattr(self, "_store", None)
         suggested = store.suggested_save_path(".sug") if store else ""
-        path, _ = themed_get_save_file_name(
+        path, _ = QFileDialog.getSaveFileName(
             self, self.tr("另存为"), suggested,
             self.tr("StrangeUtaGame 项目 (*.sug);;所有文件 (*.*)")
         )
@@ -8255,7 +8255,7 @@ class EditorInterface(QWidget):
             suggested_dir = settings.get("export.last_export_dir", "")
         suggested_path = str(Path(suggested_dir) / (base_name + ext)) if suggested_dir else base_name + ext
 
-        file_path, _ = themed_get_save_file_name(
+        file_path, _ = QFileDialog.getSaveFileName(
             self, self.tr("快捷导出"), suggested_path, file_filter
         )
         if not file_path:

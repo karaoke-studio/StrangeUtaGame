@@ -9,7 +9,7 @@ import sys
 
 from PyQt6.QtCore import Qt, QTimer, QEvent, pyqtSignal
 from PyQt6.QtGui import QKeySequence, QShortcut
-from PyQt6.QtWidgets import QApplication
+from PyQt6.QtWidgets import QApplication, QFileDialog
 
 from qfluentwidgets import (
     NavigationItemPosition,
@@ -31,11 +31,7 @@ from strange_uta_game.frontend.project_store import ProjectStore
 from strange_uta_game.frontend.theme import theme
 from strange_uta_game.frontend.dialog_policy import install_non_modal_dialog_policy
 from strange_uta_game.frontend.crash_guard import install_crash_guard
-from strange_uta_game.frontend.fluent_widgets import (
-    message_choice,
-    message_question,
-    themed_get_save_file_name,
-)
+from strange_uta_game.frontend.fluent_widgets import message_choice, message_question
 from strange_uta_game.frontend.window_sizing import (
     center_on_screen,
     clamp_size,
@@ -1630,7 +1626,7 @@ class MainWindow(MSFluentWindow):
             return self._store.save(self._store.save_path)
         else:
             suggested = self._store.suggested_save_path(".sug")
-            path, _ = themed_get_save_file_name(
+            path, _ = QFileDialog.getSaveFileName(
                 self,
                 self.tr("保存项目"),
                 suggested,

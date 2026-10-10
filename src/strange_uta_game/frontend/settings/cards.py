@@ -10,12 +10,9 @@ from typing import Optional
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QFont, QKeyEvent, QWheelEvent
 from strange_uta_game.frontend.font_utils import ui_font
-from PyQt6.QtWidgets import QDialog, QLabel, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import QDialog, QFileDialog, QLabel, QVBoxLayout, QWidget
 from strange_uta_game.frontend.theme import theme
-from strange_uta_game.frontend.fluent_widgets import (
-    dialog_button_row,
-    themed_get_existing_directory,
-)
+from strange_uta_game.frontend.fluent_widgets import dialog_button_row
 from qfluentwidgets import (
     CheckBox,
     ComboBox,
@@ -350,7 +347,7 @@ class BrowseSettingCard(SettingCard):
         self.hBoxLayout.addSpacing(16)
 
     def _on_browse(self):
-        dir_path = themed_get_existing_directory(self, self.tr("选择目录"), "")
+        dir_path = QFileDialog.getExistingDirectory(self, self.tr("选择目录"), "")
         if dir_path:
             self.line.setText(dir_path)
             self.path_changed.emit(dir_path)

@@ -5,10 +5,10 @@ from __future__ import annotations
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QFont
 from strange_uta_game.frontend.font_utils import ui_font
-from strange_uta_game.frontend.fluent_widgets import themed_get_open_file_name
 from strange_uta_game.frontend.window_sizing import fit_min_size
 from PyQt6.QtWidgets import (
     QDialog,
+    QFileDialog,
     QHBoxLayout,
     QLabel,
     QTableWidget,
@@ -274,7 +274,7 @@ class DictionaryEditDialog(QDialog):
 
     def _on_import_rl(self):
         """导入 RL 字典文件。"""
-        path, _ = themed_get_open_file_name(
+        path, _ = QFileDialog.getOpenFileName(
             self, self.tr("选择RL字典文件"), "",
             self.tr("文本文件 (*.txt);;所有文件 (*)")
         )

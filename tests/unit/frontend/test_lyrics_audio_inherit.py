@@ -18,8 +18,6 @@ from __future__ import annotations
 
 from types import MethodType, SimpleNamespace
 
-from PyQt6.QtWidgets import QFileDialog
-
 from strange_uta_game.backend.domain import Project, Sentence, Singer
 from strange_uta_game.frontend.editor.timing import file_loader as file_loader_mod
 from strange_uta_game.frontend.editor.timing.file_loader import FileLoader
@@ -189,7 +187,7 @@ def _run_prompt_load_lyrics(loader, monkeypatch, tmp_path):
     lrc = tmp_path / "lyrics.lrc"
     lrc.write_text("[00:01.00]测试", encoding="utf-8")
     monkeypatch.setattr(
-        QFileDialog, "getOpenFileName",
+        file_loader_mod.QFileDialog, "getOpenFileName",
         staticmethod(lambda *a, **k: (str(lrc), "")),
     )
     loaded = []

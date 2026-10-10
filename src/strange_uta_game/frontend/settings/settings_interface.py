@@ -601,8 +601,8 @@ class SettingsInterface(ScrollArea):
                 no_text=self.tr("取消"),
             ):
                 return
-            from strange_uta_game.frontend.fluent_widgets import themed_get_open_file_name
-            ks_path_str, _ = themed_get_open_file_name(
+            from PyQt6.QtWidgets import QFileDialog
+            ks_path_str, _ = QFileDialog.getOpenFileName(
                 self, self.tr("选择 KS settings.json"), "",
                 "JSON (*.json);;" + self.tr("所有文件 (*.*)"),
             )

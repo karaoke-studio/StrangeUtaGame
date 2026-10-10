@@ -9,11 +9,7 @@ from pathlib import Path
 from PyQt6.QtCore import QEvent, Qt, QProcess, QTimer, QUrl
 from PyQt6.QtGui import QDesktopServices, QFont
 from strange_uta_game.frontend.font_utils import ui_font
-from strange_uta_game.frontend.fluent_widgets import (
-    themed_get_existing_directory,
-    themed_get_open_file_name,
-)
-from PyQt6.QtWidgets import QApplication, QHBoxLayout, QWidget
+from PyQt6.QtWidgets import QApplication, QFileDialog, QHBoxLayout, QWidget
 from qfluentwidgets import (
     FluentIcon as FIF,
     InfoBar, InfoBarPosition,
@@ -320,7 +316,7 @@ class AboutSubInterface(SubSettingInterface):
         if cp is None:
             return
         s = self._settings_ref
-        new_dir = themed_get_existing_directory(self, self.tr("选择配置文件存储目录"), str(cp.parent))
+        new_dir = QFileDialog.getExistingDirectory(self, self.tr("选择配置文件存储目录"), str(cp.parent))
         if not new_dir:
             return
 
@@ -453,7 +449,7 @@ class AboutSubInterface(SubSettingInterface):
         if self._settings_ref:
             current = self._settings_ref.get("tools.ffmpeg_path", "") or ""
         init_dir = str(Path(current).parent) if current else self._ffmpeg_default_dir()
-        path, _ = themed_get_open_file_name(
+        path, _ = QFileDialog.getOpenFileName(
             self, self.tr("选择 FFmpeg 可执行文件"), init_dir,
             self._ffmpeg_file_filter(),
         )

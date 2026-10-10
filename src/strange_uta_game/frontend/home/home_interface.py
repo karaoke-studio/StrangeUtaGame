@@ -8,6 +8,7 @@ from PyQt6.QtWidgets import (
     QWidget,
     QVBoxLayout,
     QHBoxLayout,
+    QFileDialog,
 )
 from PyQt6.QtCore import QEvent, Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QDragEnterEvent, QDropEvent
@@ -29,8 +30,6 @@ from qfluentwidgets import (
 
 from typing import Optional, List
 from pathlib import Path
-
-from strange_uta_game.frontend.fluent_widgets import themed_get_open_file_name
 
 from strange_uta_game.backend.domain import Project, Sentence, Singer
 from strange_uta_game.backend.application import ProjectService, AutoCheckService
@@ -379,7 +378,7 @@ class HomeInterface(QWidget):
     def _on_import_lyric(self):
         """导入歌词文件"""
         init_dir = self._working_dir()
-        file_path, _ = themed_get_open_file_name(
+        file_path, _ = QFileDialog.getOpenFileName(
             self,
             self.tr("选择歌词文件"),
             init_dir,
@@ -402,7 +401,7 @@ class HomeInterface(QWidget):
     def _on_select_audio(self):
         """选择音频或视频文件"""
         init_dir = self._working_dir()
-        file_path, _ = themed_get_open_file_name(
+        file_path, _ = QFileDialog.getOpenFileName(
             self,
             self.tr("选择音频或视频文件"),
             init_dir,
@@ -629,7 +628,7 @@ class HomeInterface(QWidget):
     def _on_open_project(self):
         """打开项目"""
         init_dir = self._working_dir()
-        file_path, _ = themed_get_open_file_name(
+        file_path, _ = QFileDialog.getOpenFileName(
             self,
             self.tr("打开项目"),
             init_dir,

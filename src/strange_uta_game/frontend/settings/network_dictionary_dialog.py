@@ -28,6 +28,7 @@ from PyQt6.QtGui import QFont
 from strange_uta_game.frontend.font_utils import ui_font
 from PyQt6.QtWidgets import (
     QDialog,
+    QFileDialog,
     QHBoxLayout,
     QInputDialog,
     QLabel,
@@ -51,10 +52,7 @@ from strange_uta_game.backend.infrastructure.network_dictionary import (
     import_file_to_entries,
     resolve_app_proxies,
 )
-from strange_uta_game.frontend.fluent_widgets import (
-    message_question,
-    themed_get_open_file_name,
-)
+from strange_uta_game.frontend.fluent_widgets import message_question
 from strange_uta_game.frontend.window_sizing import fit_min_size
 
 
@@ -572,7 +570,7 @@ class NetworkDictionaryDialog(QDialog):
         if idx < 0:
             self._warn(self.tr("请先选中一个网络源"))
             return
-        path, _ = themed_get_open_file_name(
+        path, _ = QFileDialog.getOpenFileName(
             self,
             self.tr("选择 RL 兼容字典文件"),
             "",

@@ -29,7 +29,7 @@ from typing import Callable, List, Optional
 
 from PyQt6.QtCore import QObject, QThread, Qt, QTimer, QUrl, pyqtSignal
 from PyQt6.QtGui import QDesktopServices
-from PyQt6.QtWidgets import QDialog, QHBoxLayout, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import QDialog, QFileDialog, QHBoxLayout, QVBoxLayout, QWidget
 from qfluentwidgets import (
     BodyLabel,
     CaptionLabel,
@@ -71,8 +71,6 @@ from strange_uta_game.frontend.editor.timing.dialogs import (
 from strange_uta_game.frontend.fluent_widgets import (
     FluentGroupBox,
     message_question,
-    themed_get_existing_directory,
-    themed_get_open_file_name,
 )
 from strange_uta_game.frontend.window_sizing import fit_to_screen
 
@@ -1429,7 +1427,7 @@ class AiTimingDialog(QDialog):
         if self._busy:
             self._notify_busy_path_change()
             return
-        chosen = themed_get_existing_directory(
+        chosen = QFileDialog.getExistingDirectory(
             self, self.tr("选择模型根目录"), str(resolve_model_root(self._settings))
         )
         if chosen:
@@ -1446,7 +1444,7 @@ class AiTimingDialog(QDialog):
             return
         # 起点 = 行内当前显示的生效缓存根（而非设置项：独立模式默认
         # 缓存根不在设置里，此前会错误地从用户主目录开始）
-        chosen = themed_get_existing_directory(
+        chosen = QFileDialog.getExistingDirectory(
             self,
             self.tr("选择 AI 缓存根目录（独立运行模式生效）"),
             str(self._current_cache_root()),
@@ -1467,7 +1465,7 @@ class AiTimingDialog(QDialog):
             return
         # 未显式选择过解释器时，从当前解释器所在目录开始
         start = self._settings.runtime_python or str(Path(sys.executable).parent)
-        chosen, _filter = themed_get_open_file_name(
+        chosen, _filter = QFileDialog.getOpenFileName(
             self,
             self.tr("选择对齐运行环境的 python.exe"),
             start,

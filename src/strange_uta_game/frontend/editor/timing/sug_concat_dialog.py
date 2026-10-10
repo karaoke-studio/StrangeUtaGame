@@ -16,6 +16,7 @@ from PyQt6.QtGui import QDrag, QPixmap
 from PyQt6.QtWidgets import (
     QApplication,
     QDialog,
+    QFileDialog,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -37,10 +38,7 @@ from qfluentwidgets import (
 )
 
 from strange_uta_game.frontend.font_utils import ui_font
-from strange_uta_game.frontend.fluent_widgets import (
-    FluentGroupBox,
-    themed_get_open_file_names,
-)
+from strange_uta_game.frontend.fluent_widgets import FluentGroupBox
 from strange_uta_game.frontend.window_sizing import fit_to_screen
 
 
@@ -658,7 +656,7 @@ class SugConcatDialog(QDialog):
         except Exception:
             pass
 
-        paths, _ = themed_get_open_file_names(
+        paths, _ = QFileDialog.getOpenFileNames(
             self,
             self.tr("选择要拼接的SUG文件"),
             init_dir,

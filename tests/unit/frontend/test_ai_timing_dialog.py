@@ -7,7 +7,6 @@ ETA 估算与取消二次确认文案；不启动真实后台任务。
 from pathlib import Path
 
 import pytest
-from PyQt6.QtWidgets import QFileDialog
 
 from strange_uta_game.backend.application.ai_timing.models import ModelRegistry
 from strange_uta_game.backend.application.ai_timing.runtime import (
@@ -154,7 +153,7 @@ class TestPathChangeAppliesImmediately:
         import strange_uta_game.frontend.editor.ai_timing_dialog as dlg_mod
 
         monkeypatch.setattr(
-            QFileDialog,
+            dlg_mod.QFileDialog,
             "getExistingDirectory",
             lambda *a, **k: str(chosen),
         )
@@ -965,7 +964,7 @@ class TestTaskGuardsAndTeardown:
         dialog._busy = True
         picked = []
         monkeypatch.setattr(
-            QFileDialog,
+            dlg_mod.QFileDialog,
             "getOpenFileName",
             lambda *a, **k: picked.append(a) or ("", ""),
         )

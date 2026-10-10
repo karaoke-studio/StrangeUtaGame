@@ -9,10 +9,6 @@
 - ``ThemedMenuLineEdit`` / ``ThemedMenuTextEdit``：原生 ``QLineEdit`` /
   ``QTextEdit`` 换用 qfluentwidgets 主题右键菜单（原生菜单不跟主题，
   深色模式下仍是系统白色弹窗）。
-- ``themed_get_open_file_name`` 等 4 个文件弹窗包装：Windows 上改用 Qt
-  自绘文件弹窗（原生 IFileDialog 无法跟随应用主题），由主题过滤器
-  （theme._DialogTitleBarThemeFilter）在显示时套上随主题的样式表；
-  其它平台保持原生弹窗。
 - ``message_info`` / ``message_warning`` / ``message_error`` / ``message_question``：
   替代 ``QMessageBox`` 的常见用法，内部使用 qfluentwidgets ``MessageBox``。
 """
@@ -20,7 +16,6 @@
 from __future__ import annotations
 
 import math
-import sys
 from typing import Callable, Optional, Sequence
 
 from PyQt6.QtCore import (
@@ -40,7 +35,6 @@ from PyQt6.QtWidgets import (
     QApplication,
     QButtonGroup,
     QDialog,
-    QFileDialog,
     QHBoxLayout,
     QLayout,
     QLineEdit,
@@ -86,45 +80,6 @@ class ThemedMenuTextEdit(QTextEdit):
 
     def contextMenuEvent(self, event):
         TextEditMenu(self).exec(event.globalPos())
-
-
-# ── 主题化文件弹窗 ──────────────────────────────────────────────────────────
-# Windows 原生文件弹窗（IFileDialog）由系统按系统主题绘制，无 API 强制跟随
-# 应用主题；Qt 自绘弹窗（DontUseNativeDialog）靠调色板/QSS 渲染，可被主题
-# 接管——QSS 由 theme._DialogTitleBarThemeFilter 在弹窗 Show 时自动套上，
-# 标题栏明暗也由同一过滤器同步。macOS 保持原生（file_loader 对 NSOpenPanel
-# 有平台特定处理）。
-
-
-def _themed_file_dialog_options() -> QFileDialog.Option:
-    """文件弹窗选项：Windows 自绘（可主题化），其它平台原生。"""
-    if sys.platform == "win32":
-        return QFileDialog.Option.DontUseNativeDialog
-    return QFileDialog.Option(0)
-
-
-def themed_get_open_file_name(parent=None, caption="", directory="", filter=""):
-    return QFileDialog.getOpenFileName(
-        parent, caption, directory, filter, "", _themed_file_dialog_options()
-    )
-
-
-def themed_get_open_file_names(parent=None, caption="", directory="", filter=""):
-    return QFileDialog.getOpenFileNames(
-        parent, caption, directory, filter, "", _themed_file_dialog_options()
-    )
-
-
-def themed_get_save_file_name(parent=None, caption="", directory="", filter=""):
-    return QFileDialog.getSaveFileName(
-        parent, caption, directory, filter, "", _themed_file_dialog_options()
-    )
-
-
-def themed_get_existing_directory(parent=None, caption="", directory=""):
-    return QFileDialog.getExistingDirectory(
-        parent, caption, directory, _themed_file_dialog_options()
-    )
 
 
 class _WorkspaceSwitchItem(QAbstractButton):
