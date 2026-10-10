@@ -22,7 +22,7 @@ from typing import Optional
 
 from PyQt6.QtCore import QEvent, Qt, pyqtSignal, QObject, QTimer
 from PyQt6.QtGui import QColor, QPalette
-from PyQt6.QtWidgets import QApplication, QDialog, QWidget
+from PyQt6.QtWidgets import QApplication, QDialog, QFileDialog, QWidget
 
 from strange_uta_game.frontend.background_throttle import background_throttle
 
@@ -350,11 +350,58 @@ def _apply_native_titlebar_theme(dialog: QDialog, dark: bool) -> None:
         pass
 
 
+def _build_file_dialog_qss(mgr: "Theme") -> str:
+    """Qt 自绘文件弹窗的随主题样式表。
+
+    windows11 样式下 QComboBox / 弹窗内 QLineEdit 不完全跟随深色调色板
+    （渲染成白底），树/列表/按钮则正常走调色板——这里只补齐发白的控件，
+    颜色取自 ThemeColors，深浅两套自动成立。
+    """
+    c = mgr.colors
+    return f"""
+    QLineEdit, QComboBox {{
+        background: {c.bg_tertiary.name()};
+        color: {c.text_primary.name()};
+        border: 1px solid {c.border_primary.name()};
+        border-radius: 4px;
+        padding: 2px 6px;
+        selection-background-color: {c.bg_selected.name()};
+    }}
+    QComboBox::drop-down {{ border: none; width: 22px; }}
+    QComboBox QAbstractItemView {{
+        background: {c.bg_tertiary.name()};
+        color: {c.text_primary.name()};
+        selection-background-color: {c.bg_selected.name()};
+        border: 1px solid {c.border_primary.name()};
+    }}
+    QPushButton {{
+        background: {c.bg_tertiary.name()};
+        color: {c.text_primary.name()};
+        border: 1px solid {c.border_primary.name()};
+        border-radius: 4px;
+        padding: 4px 14px;
+    }}
+    QPushButton:hover {{ background: {c.bg_hover.name()}; }}
+    QPushButton:pressed {{ background: {c.border_primary.name()}; }}
+    QToolBar {{ background: {c.bg_primary.name()}; border: none; }}
+    QToolButton {{
+        background: transparent;
+        color: {c.text_primary.name()};
+        border: none;
+        padding: 3px;
+    }}
+    QToolButton:hover {{ background: {c.bg_hover.name()}; border-radius: 4px; }}
+    QSplitter::handle {{ background: {c.border_primary.name()}; }}
+    """
+
+
 class _DialogTitleBarThemeFilter(QObject):
     """弹窗显示（或原生窗口重建）时，把原生标题栏明暗同步为当前主题。
 
     应用级事件过滤器：无需逐个弹窗改造，现有及未来新增的 QDialog 全部
-    覆盖（与 dialog_policy 的非模态弹窗策略同一手法）。
+    覆盖（与 dialog_policy 的非模态弹窗策略同一手法）。Qt 自绘文件弹窗
+    （DontUseNativeDialog，见 fluent_widgets 的 themed_get_* 包装）显示时
+    额外套上随主题的样式表。
     """
 
     def __init__(self, theme_ref: Theme):
@@ -367,6 +414,10 @@ class _DialogTitleBarThemeFilter(QObject):
             and isinstance(watched, QDialog)
         ):
             _apply_native_titlebar_theme(watched, self._theme.is_dark)
+            if isinstance(watched, QFileDialog) and watched.testOption(
+                QFileDialog.Option.DontUseNativeDialog
+            ):
+                watched.setStyleSheet(_build_file_dialog_qss(self._theme))
         return False
 
 
@@ -517,6 +568,10 @@ class Theme(QObject):
         for widget in app.topLevelWidgets():
             if isinstance(widget, QDialog):
                 _apply_native_titlebar_theme(widget, dark)
+                if isinstance(widget, QFileDialog) and widget.testOption(
+                    QFileDialog.Option.DontUseNativeDialog
+                ):
+                    widget.setStyleSheet(_build_file_dialog_qss(self))
 
     def _start_polling(self) -> None:
         """启动定时器轮询系统主题（Win10 兼容方案）"""

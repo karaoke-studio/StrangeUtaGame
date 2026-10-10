@@ -33,10 +33,10 @@ except Exception:  # pragma: no cover
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QFont
 from strange_uta_game.frontend.font_utils import ui_font
+from strange_uta_game.frontend.fluent_widgets import themed_get_open_file_name
 from PyQt6.QtWidgets import (
     QApplication,
     QDialog,
-    QFileDialog,
     QFrame,
     QHBoxLayout,
     QVBoxLayout,
@@ -460,7 +460,7 @@ class EmojiTagDialog(QDialog):
     def _browse_image(self, edit: "LineEdit"):
         """弹出文件选择框，从上次加载目录开始，选中后把文件名写入 ``edit``。"""
         init_dir = self._last_image_dir()
-        path, _ = QFileDialog.getOpenFileName(
+        path, _ = themed_get_open_file_name(
             self,
             self.tr("选择图片文件"),
             init_dir,

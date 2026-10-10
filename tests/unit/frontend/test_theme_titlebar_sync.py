@@ -19,8 +19,11 @@ from strange_uta_game.frontend import theme as theme_mod
 from strange_uta_game.frontend.theme import ThemeMode, theme
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture(scope="session")
 def qapp():
+    # 会话级持有 QApplication 引用：theme 单例先于 app 创建，若 app 在模块
+    # 间被 GC，PyQt 会连带析构 theme 的 C++ 对象（下一个模块再操作
+    # theme.mode 即 RuntimeError）。生产环境 app 不会中途销毁，仅测试需要。
     return QApplication.instance() or QApplication([])
 
 

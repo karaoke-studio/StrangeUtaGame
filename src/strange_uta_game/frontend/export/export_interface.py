@@ -11,7 +11,6 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QFrame,
-    QFileDialog,
     QListWidget,
     QListWidgetItem,
     QDialog,
@@ -58,6 +57,7 @@ from strange_uta_game.frontend.fluent_widgets import (
     FluentGroupBox,
     ThemedMenuTextEdit,
     message_question,
+    themed_get_existing_directory,
 )
 from strange_uta_game.frontend.window_sizing import fit_to_screen
 
@@ -980,7 +980,7 @@ class ExportInterface(QWidget):
             default_dir = self._store.export_dir
         if not default_dir:
             default_dir = AppSettings().get("export.last_export_dir", "")
-        path = QFileDialog.getExistingDirectory(self, self.tr("选择导出目录"), default_dir)
+        path = themed_get_existing_directory(self, self.tr("选择导出目录"), default_dir)
         if path:
             self.line_output.setText(path)
             self._output_user_set = True
@@ -1178,7 +1178,7 @@ class ExportInterface(QWidget):
                 default_dir = self._store.export_dir
             if not default_dir:
                 default_dir = AppSettings().get("export.last_export_dir", "")
-            output_dir = QFileDialog.getExistingDirectory(self, self.tr("选择导出目录"), default_dir)
+            output_dir = themed_get_existing_directory(self, self.tr("选择导出目录"), default_dir)
             if not output_dir:
                 return
             self.line_output.setText(output_dir)
