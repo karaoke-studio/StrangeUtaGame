@@ -9,7 +9,6 @@ from PyQt6.QtWidgets import (
     QDialog,
     QHBoxLayout,
     QLabel,
-    QLineEdit,
     QVBoxLayout,
     QTextEdit,
 )
@@ -25,6 +24,7 @@ from qfluentwidgets import (
 )
 
 from strange_uta_game.frontend.font_utils import ui_font
+from strange_uta_game.frontend.fluent_widgets import ThemedMenuLineEdit
 
 # 剥离行内结构化标签的正则（与 fulltext_interface 保持一致）
 _STRIP_SINGER_RE = re.compile(r"【[^】]*】")
@@ -117,7 +117,7 @@ class FindDialog(QDialog):
         lbl1 = QLabel(tr("查找内容:"))
         lbl1.setFont(ui_font(9))
         row1.addWidget(lbl1)
-        self._search_input = QLineEdit()
+        self._search_input = ThemedMenuLineEdit()
         self._search_input.setPlaceholderText(tr("输入要查找的文本"))
         self._search_input.setFont(ui_font(10))
         self._search_input.setMinimumWidth(180)
@@ -135,7 +135,7 @@ class FindDialog(QDialog):
         lbl2 = QLabel(tr("替换为:"))
         lbl2.setFont(ui_font(9))
         row2.addWidget(lbl2)
-        self._replace_input = QLineEdit()
+        self._replace_input = ThemedMenuLineEdit()
         self._replace_input.setPlaceholderText(tr("输入替换文本（留空则删除）"))
         self._replace_input.setFont(ui_font(10))
         self._replace_input.setMinimumWidth(180)

@@ -15,7 +15,6 @@ from PyQt6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QDialog,
-    QTextEdit,
 )
 from PyQt6.QtCore import QEvent, Qt, pyqtSignal
 from PyQt6.QtGui import QColor
@@ -55,7 +54,11 @@ from strange_uta_game.frontend.settings.settings_interface import (
     NicokaraTagsDialog,
 )
 from strange_uta_game.frontend.theme import theme as _theme
-from strange_uta_game.frontend.fluent_widgets import FluentGroupBox, message_question
+from strange_uta_game.frontend.fluent_widgets import (
+    FluentGroupBox,
+    ThemedMenuTextEdit,
+    message_question,
+)
 from strange_uta_game.frontend.window_sizing import fit_to_screen
 
 
@@ -78,7 +81,7 @@ class RubyMismatchDialog(QDialog):
         desc.setWordWrap(True)
         layout.addWidget(desc)
 
-        self._preview = QTextEdit()
+        self._preview = ThemedMenuTextEdit()
         self._preview.setReadOnly(True)
         self._build_preview_content(detail)
         layout.addWidget(self._preview, 1)

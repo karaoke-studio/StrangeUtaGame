@@ -6,6 +6,9 @@
 - ``FluentGroupBox``：替代原生 ``QGroupBox``（qfluentwidgets 无 GroupBox，
   这里用受主题管理的 ``SimpleCardWidget`` + 标题实现）。
 - ``RangeSlider``：双柄范围滑块（qfluentwidgets 社区版无此控件，自绘）。
+- ``ThemedMenuLineEdit`` / ``ThemedMenuTextEdit``：原生 ``QLineEdit`` /
+  ``QTextEdit`` 换用 qfluentwidgets 主题右键菜单（原生菜单不跟主题，
+  深色模式下仍是系统白色弹窗）。
 - ``message_info`` / ``message_warning`` / ``message_error`` / ``message_question``：
   替代 ``QMessageBox`` 的常见用法，内部使用 qfluentwidgets ``MessageBox``。
 """
@@ -34,11 +37,14 @@ from PyQt6.QtWidgets import (
     QDialog,
     QHBoxLayout,
     QLayout,
+    QLineEdit,
+    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
 from qfluentwidgets import (
     Dialog,
+    LineEditMenu,
     PrimaryPushButton,
     PushButton,
     SimpleCardWidget,
@@ -47,8 +53,33 @@ from qfluentwidgets import (
     isDarkTheme,
     themeColor,
 )
+# TextEditMenu 未在包顶层导出，按库内部用法从子模块导入。
+from qfluentwidgets.components.widgets.menu import TextEditMenu
 
 from strange_uta_game.frontend.theme import theme
+
+
+class ThemedMenuLineEdit(QLineEdit):
+    """原生 ``QLineEdit``，右键菜单换成 qfluentwidgets 主题菜单。
+
+    适用于必须保持原生外观/布局、只缺主题化右键菜单的输入框
+    （qfluentwidgets 自带的 ``LineEdit`` 可直接用时优先用后者）。
+    """
+
+    def contextMenuEvent(self, event):
+        LineEditMenu(self).exec(event.globalPos())
+
+
+class ThemedMenuTextEdit(QTextEdit):
+    """原生 ``QTextEdit``，右键菜单换成 qfluentwidgets 主题菜单。
+
+    只读预览同样适用（``TextEditMenu`` 会按 ``isReadOnly`` 收窄菜单项）。
+    ``QPlainTextEdit`` 场景请直接在子类里用 ``TextEditMenu`` 重写
+    ``contextMenuEvent``（见 fulltext_interface.LineNumberPlainTextEdit）。
+    """
+
+    def contextMenuEvent(self, event):
+        TextEditMenu(self).exec(event.globalPos())
 
 
 class _WorkspaceSwitchItem(QAbstractButton):

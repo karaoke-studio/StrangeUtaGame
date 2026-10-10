@@ -39,6 +39,8 @@ from qfluentwidgets import (
     FluentIcon as FIF,
     CaptionLabel,
 )
+# TextEditMenu 未在 qfluentwidgets 包顶层导出，按库内部用法从子模块导入。
+from qfluentwidgets.components.widgets.menu import TextEditMenu
 
 import re
 from typing import Optional, List
@@ -257,6 +259,16 @@ class LineNumberPlainTextEdit(QPlainTextEdit):
             block = block.next()
             top = bottom
             bottom = top + round(self.blockBoundingRect(block).height())
+
+    def contextMenuEvent(self, event):
+        """右键菜单用 qfluentwidgets 主题菜单，跟随明暗主题配色。
+
+        原生 ``QPlainTextEdit`` 的默认菜单不受 qfluentwidgets 主题接管，
+        深色模式下仍是系统白色弹窗；``TextEditMenu`` 对
+        ``QPlainTextEdit`` 同样适用（只依赖 textCursor/toPlainText 及
+        cut/copy/paste/undo/selectAll 槽）。
+        """
+        TextEditMenu(self).exec(event.globalPos())
 
     def wheelEvent(self, event):
         """Alt+滚轮缩放字体（放大/缩小），其余情况维持默认滚动。
