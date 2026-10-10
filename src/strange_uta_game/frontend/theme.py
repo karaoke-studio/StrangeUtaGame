@@ -20,9 +20,9 @@ import sys
 from enum import Enum, auto
 from typing import Optional
 
-from PyQt6.QtCore import Qt, pyqtSignal, QObject, QTimer
+from PyQt6.QtCore import QEvent, Qt, pyqtSignal, QObject, QTimer
 from PyQt6.QtGui import QColor, QPalette
-from PyQt6.QtWidgets import QApplication, QWidget
+from PyQt6.QtWidgets import QApplication, QDialog, QWidget
 
 from strange_uta_game.frontend.background_throttle import background_throttle
 
@@ -318,6 +318,58 @@ class ThemeColors:
         return f"font-size: 13px; color: {color};"
 
 
+# ── 弹窗原生标题栏跟随应用主题 ─────────────────────────────────────────────
+# QDialog 及其子类默认用系统原生标题栏，明暗跟随 Windows 系统设置而非本应用
+# 主题（深色应用 + 系统浅色时，弹窗顶部是一条刺眼的白色标题栏）。主窗口
+# MSFluentWindow 在 Win11 上通过 DWMWA_USE_IMMERSIVE_DARK_MODE 让系统标题栏
+# 跟随 qfluentwidgets 主题，这里对弹窗沿用同一机制。
+
+
+def _apply_native_titlebar_theme(dialog: QDialog, dark: bool) -> None:
+    """把弹窗原生标题栏的明暗设为 ``dark``（仅 Windows）。
+
+    系统不支持该属性（老 Win10 / 非 Windows）时调用失败，静默保持系统
+    默认样式，与 qfluentwidgets 自身处理 DWM 调用的策略一致。
+    """
+    if sys.platform != "win32":
+        return
+    try:
+        hwnd = int(dialog.winId())
+        if not hwnd:
+            return
+        import ctypes
+
+        value = ctypes.c_int(1 if dark else 0)
+        dwm = ctypes.windll.dwmapi
+        size = ctypes.sizeof(value)
+        # 20 = DWMWA_USE_IMMERSIVE_DARK_MODE（19041+）；旧 Win10 曾用未公开
+        # 编号 19，先试 20 失败再试 19 兼容老系统。
+        if dwm.DwmSetWindowAttribute(hwnd, 20, ctypes.byref(value), size) != 0:
+            dwm.DwmSetWindowAttribute(hwnd, 19, ctypes.byref(value), size)
+    except Exception:
+        pass
+
+
+class _DialogTitleBarThemeFilter(QObject):
+    """弹窗显示（或原生窗口重建）时，把原生标题栏明暗同步为当前主题。
+
+    应用级事件过滤器：无需逐个弹窗改造，现有及未来新增的 QDialog 全部
+    覆盖（与 dialog_policy 的非模态弹窗策略同一手法）。
+    """
+
+    def __init__(self, theme_ref: Theme):
+        super().__init__(theme_ref)
+        self._theme = theme_ref
+
+    def eventFilter(self, watched, event) -> bool:  # noqa: N802
+        if (
+            event.type() in (QEvent.Type.Show, QEvent.Type.WinIdChange)
+            and isinstance(watched, QDialog)
+        ):
+            _apply_native_titlebar_theme(watched, self._theme.is_dark)
+        return False
+
+
 class Theme(QObject):
     """主题管理器单例
 
@@ -348,6 +400,7 @@ class Theme(QObject):
         self._is_win10: bool = self._detect_windows_version()
         self._refreshing_widgets: bool = False
         self._refresh_widgets_pending: bool = False
+        self._titlebar_filter: Optional[_DialogTitleBarThemeFilter] = None
 
         # 检测初始系统主题
         self._detect_system_theme()
@@ -371,6 +424,9 @@ class Theme(QObject):
 
         # 监听系统主题变化
         self._setup_system_theme_listener()
+
+        # 弹窗原生标题栏跟随应用主题（应用级事件过滤器）
+        self._setup_dialog_titlebar_sync()
 
     @staticmethod
     def _detect_windows_version() -> bool:
@@ -435,6 +491,32 @@ class Theme(QObject):
         # Win10 上 colorSchemeChanged 不触发，使用定时器轮询
         if self._is_win10 or not connected:
             self._start_polling()
+
+    def _setup_dialog_titlebar_sync(self) -> None:
+        """安装弹窗标题栏主题过滤器（幂等）。
+
+        QApplication 尚未创建（如无 GUI 的测试进程先 import 本模块）时
+        本次跳过，待下一次 ``_apply_theme_change`` / ``_sync_dialog_titlebar_theme``
+        再补装。
+        """
+        if self._titlebar_filter is not None:
+            return
+        app = QApplication.instance()
+        if not app:
+            return
+        self._titlebar_filter = _DialogTitleBarThemeFilter(self)
+        app.installEventFilter(self._titlebar_filter)
+
+    def _sync_dialog_titlebar_theme(self) -> None:
+        """主题变化后，把所有已存在弹窗的原生标题栏重刷为新主题明暗。"""
+        self._setup_dialog_titlebar_sync()
+        app = QApplication.instance()
+        if not app:
+            return
+        dark = self.is_dark
+        for widget in app.topLevelWidgets():
+            if isinstance(widget, QDialog):
+                _apply_native_titlebar_theme(widget, dark)
 
     def _start_polling(self) -> None:
         """启动定时器轮询系统主题（Win10 兼容方案）"""
@@ -625,6 +707,7 @@ class Theme(QObject):
         self._apply_global_qss()
         self._apply_qfluentwidgets_theme(lazy=True)
         self._refresh_all_widgets()
+        self._sync_dialog_titlebar_theme()
         self.changed.emit()
 
     def _reapply_win11_appearance(self) -> None:
@@ -649,6 +732,7 @@ class Theme(QObject):
         self._apply_global_qss()
         self._apply_qfluentwidgets_theme(lazy=False)
         self._refresh_all_widgets()
+        self._sync_dialog_titlebar_theme()
         self.changed.emit()
 
     @property
