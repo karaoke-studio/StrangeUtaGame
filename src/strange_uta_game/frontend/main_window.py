@@ -216,6 +216,8 @@ class MainWindow(MSFluentWindow):
         #   开（默认）→ BassTsmEngine：离线 TSM 预渲染，变速不变调、无爆音；
         #   关        → BassEngine：原版 BASS 实时变速，零缓存但可能爆音。
         self._audio_engine = self._make_audio_engine()
+        # 无 BASS 平台：注入"系统默认输出设备"监视，播放跟随默认设备切换（#126）
+        self._setup_default_output_device_monitor()
 
         self._report_progress(30, self.tr("正在初始化核心服务..."))
         self._command_manager = CommandManager()
@@ -984,6 +986,55 @@ class MainWindow(MSFluentWindow):
         from strange_uta_game.backend.infrastructure.audio import select_audio_engine
 
         return select_audio_engine(self._hq_speed_enabled())
+
+    def _setup_default_output_device_monitor(self):
+        """无 BASS 平台：监视系统默认输出设备并喂给 SoundDeviceEngine（#126）。
+
+        macOS 上 PortAudio 的设备表在初始化后不再自动更新，引擎自身看不到
+        "默认输出设备已切换"（既无回调错误、流也不失效）。这里在主线程用
+        QTimer（500ms）轮询 Qt ``QMediaDevices.defaultAudioOutput()`` 的
+        ``QAudioDevice.id()``，注入引擎作为设备标识 provider；引擎在检测到
+        标识变化时自行热迁移输出端点（刷新 PortAudio 设备表 + 重建流）。
+
+        QtMultimedia 不可用时静默跳过：引擎回退到 PortAudio 视角（Windows
+        上部分可用；macOS 上不劣于修复前）。Qt 查询全部发生在主线程，
+        provider 闭包只读一个被主线程更新的 dict 单元（GIL 下原子）。
+        """
+        from strange_uta_game.backend.infrastructure.audio import SoundDeviceEngine
+
+        # BASS 平台引擎不是 SoundDeviceEngine，无需监视；SoundDeviceEngine
+        # 在 sounddevice 缺失的环境里导入失败时为 None，isinstance 会抛
+        # TypeError，须先排除（与 _apply_audio_engine_setting 同一坑）。
+        if SoundDeviceEngine is None or not isinstance(
+            self._audio_engine, SoundDeviceEngine
+        ):
+            return
+        try:
+            from PyQt6.QtMultimedia import QMediaDevices
+        except Exception:
+            return
+
+        cell = {"key": None}
+
+        def _poll_default_output() -> None:
+            try:
+                device = QMediaDevices.defaultAudioOutput()
+                cell["key"] = (
+                    None
+                    if device.isNull()
+                    else bytes(device.id()).decode("utf-8", "replace")
+                )
+            except Exception:
+                cell["key"] = None
+
+        _poll_default_output()  # 注入前先取一次，立即建立基线
+        timer = QTimer(self)
+        timer.setInterval(500)
+        timer.timeout.connect(_poll_default_output)
+        timer.start()
+        # 持引用防 GC（父对象是 self，其实已保活，显式留名便于排查）
+        self._default_device_monitor_timer = timer
+        self._audio_engine.set_default_output_device_provider(lambda: cell["key"])
 
     def _apply_audio_engine_setting(self):
         """设置变更时按"高质量音频变速"开关切换引擎。

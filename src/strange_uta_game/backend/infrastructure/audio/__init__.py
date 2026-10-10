@@ -6,6 +6,10 @@ BASS 引擎仅 Windows 可用（依赖 bass.dll / bass_fx.dll）。本包以
 原有 BASS 行为不变。
 """
 
+from __future__ import annotations
+
+import os
+
 from .base import (
     IAudioEngine,
     AudioError,
@@ -43,7 +47,13 @@ def select_audio_engine(hq_enabled: bool) -> IAudioEngine:
     - BASS 不可用（mac 等）：始终返回 ``SoundDeviceEngine``（其内置 TSMRenderCache
       承担 HQ 变速，HQ 开关在此平台为 no-op）。
     - BASS 可用（Windows）：HQ 开 → ``BassTsmEngine``（离线预渲染）；关 → ``BassEngine``。
+
+    调试开关 ``SUG_FORCE_SD_AUDIO=1``：强制使用回退引擎。用于在 Windows 上
+    实测回退引擎的行为（如 #126 默认输出设备切换跟随）——BASS 平台平时
+    走不到该引擎，只能这样打开。正常发布路径不受影响。
     """
+    if os.environ.get("SUG_FORCE_SD_AUDIO") and SoundDeviceEngine is not None:
+        return SoundDeviceEngine()
     if bass_available and BassEngine is not None and BassTsmEngine is not None:
         return BassTsmEngine() if hq_enabled else BassEngine()
     return SoundDeviceEngine()

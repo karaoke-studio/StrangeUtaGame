@@ -180,6 +180,12 @@ import sounddevice as _sd
 import soundfile as _sf
 import numpy as _np
 
+from .portaudio_refresh import (
+    portaudio_refresh_in_progress,
+    register_refresh_listener,
+    unregister_refresh_listener,
+)
+
 
 class SdSampleStreamPool:
     """轮换 OutputStream 小池：让 sounddevice 短音效可重叠播放。
@@ -202,10 +208,20 @@ class SdSampleStreamPool:
         self._next = 0
         self._sr = 0
         self._ch = 0
+        # PortAudio 设备表刷新（#126：主引擎检测到默认输出设备切换）前必须
+        # 关闭本池所有流——Pa_Terminate 会摧毁在开的流。刷新后按需重建
+        # （play 惰性建流）。close() 永久关池时注销监听。
+        self._refresh_listener = self._close_for_refresh
+        register_refresh_listener(self._refresh_listener)
 
     def play(self, data: "_np.ndarray", sr: int) -> None:
         """非阻塞播放一段 PCM（可为 (n,) 或 (n, ch)），与池内其它槽互不掐断。"""
         if data is None or len(data) == 0:
+            return
+        # PortAudio 刷新窗口内不新开流（也不退回 sd.play——它同样要开流）：
+        # 键音/节拍音是毫秒级短音效，丢一发无感（BASS 路径设备恢复时同样
+        # 丢弃在途样本）。
+        if portaudio_refresh_in_progress():
             return
         ch = int(data.shape[1]) if data.ndim > 1 else 1
         started = False
@@ -279,11 +295,19 @@ class SdSampleStreamPool:
                 except Exception:
                     pass
 
-    def close(self) -> None:
+    def _close_for_refresh(self) -> None:
+        """PortAudio 刷新前回调：关闭整池流并复位参数（#126）。
+
+        保持注册状态——刷新后 play() 惰性重建流，之后的刷新仍需联动本池。
+        """
         with self._lock:
             self._close_locked()
         self._sr = 0
         self._ch = 0
+
+    def close(self) -> None:
+        unregister_refresh_listener(self._refresh_listener)
+        self._close_for_refresh()
 
 
 class SoundDeviceKeySoundPlayer:

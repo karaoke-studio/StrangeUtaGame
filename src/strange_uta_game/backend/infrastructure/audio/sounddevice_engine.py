@@ -50,6 +50,7 @@ from .base import (
     PlaybackState,
     compute_mono_samples,
 )
+from .portaudio_refresh import refresh_portaudio_devices
 from .ring_buffer import RingBuffer
 from .tsm_cache import TSMRenderCache, LoadProgressCallback, _quantize
 
@@ -89,6 +90,31 @@ _PRODUCER_TICK = 0.005
 # WASAPI Shared 模式硬下限约 20ms，传更小值会被 clamp 到硬件最小值。
 # 传 0.1 让 PortAudio 申请标准低缓冲，实际值由 stream.latency 读回。
 _TARGET_LATENCY = 0.1
+
+# 默认输出设备轮询间隔（秒）：producer 线程以此频率比对"系统当前默认
+# 输出设备"与"当前流绑定的默认设备"（#126）。
+_DEFAULT_DEVICE_POLL_INTERVAL = 0.5
+
+
+def _portaudio_default_output_key():
+    """回退 provider：PortAudio 视角下的默认输出设备标识。
+
+    Windows 上 PortAudio 对设备热插拔有一定自动刷新能力；macOS 上设备表
+    在 ``Pa_Initialize`` 后不再更新，此函数看不到后续变化——真正的检测
+    依赖前端注入的 provider（Qt ``QMediaDevices``，见 main_window 接线）。
+
+    Returns:
+        可哈希的设备标识；无法确定时返回 None（调用方跳过本轮比对）。
+    """
+    try:
+        idx = sd.default.device[1]
+        if idx is None or idx < 0:
+            return None
+        info = sd.query_devices(idx)
+        # 用 name 不用 index：设备表刷新后 index 会整体重排
+        return ("pa", info["name"])
+    except Exception:
+        return None
 
 
 class SoundDeviceEngine(IAudioEngine):
@@ -152,6 +178,17 @@ class SoundDeviceEngine(IAudioEngine):
         # ---- 热重载标志位 ----
         # 当音频回调检测到底层设备异常时置位，由 producer 线程执行恢复
         self._needs_recovery = threading.Event()
+
+        # ---- 默认输出设备跟踪（#126）----
+        # 流不指定 device 打开，绑定的是"开流那一刻"的系统默认设备；用户
+        # 中途改默认设备（插耳机等）在 macOS 上既无回调错误、流也不失效，
+        # 只能轮询比对。_default_device_provider：由前端注入，返回当前系统
+        # 默认输出设备的可哈希标识（Qt QAudioDevice.id()）；未注入时回退
+        # PortAudio 视角。_open_default_device_key：当前流实际绑定的默认
+        # 设备标识（None = 基线待建立）。
+        self._default_device_provider: Optional[Callable[[], object]] = None
+        self._open_default_device_key: object = None
+        self._last_device_poll_ts: float = 0.0
 
         # ---- 消费者侧高精度时基锚点 ----
         # 由 _audio_callback（PortAudio 实时线程）更新，无竞态：
@@ -291,6 +328,8 @@ class SoundDeviceEngine(IAudioEngine):
                 self._last_callback_perf_time = 0.0
             self._stream_latency_frames = 0
         self._ring = None
+        # 默认设备基线作废：下次 load() 开流时重新采纳
+        self._open_default_device_key = None
 
     # ==================== 播放控制 ====================
 
@@ -528,6 +567,71 @@ class SoundDeviceEngine(IAudioEngine):
         """分析用单声道（加载线程预混），波形/声谱/BPM 检测共用。"""
         return self._mono_data
 
+    # ==================== 默认输出设备跟踪（#126） ====================
+
+    def set_default_output_device_provider(
+        self, provider: Optional[Callable[[], object]]
+    ) -> None:
+        """注入"当前系统默认输出设备"标识提供器（mac 等无 BASS 平台使用）。
+
+        provider 返回任意可哈希标识（前端用 Qt ``QMediaDevices.defaultAudioOutput``
+        的 ``QAudioDevice.id()``），返回 None 表示暂不可用。标识相对**当前流
+        绑定的默认设备**（``_open_default_device_key``）发生变化时，producer
+        线程会触发热重载：刷新 PortAudio 设备表并在新默认设备上重建流，
+        保持与 BASS 路径一致的"跟随系统默认输出设备"行为。
+
+        注入/撤销会重置基线（下一轮轮询直接采纳当前值，不触发恢复）。
+        """
+        self._default_device_provider = provider
+        self._open_default_device_key = None
+
+    def _current_default_device_key(self):
+        """取当前系统默认输出设备标识（注入 provider 优先，失败/未注入回退 PortAudio）。"""
+        provider = self._default_device_provider
+        if provider is not None:
+            try:
+                return provider()
+            except Exception:
+                return None
+        return _portaudio_default_output_key()
+
+    def _align_default_device_before_open(self) -> None:
+        """开流前对齐默认设备基线；基线已过期则先刷新 PortAudio 设备表。
+
+        macOS 上 PortAudio 的设备表/默认设备缓存在 ``Pa_Initialize`` 后不再
+        更新：仅销毁重建流仍会绑到旧默认设备（#126："重载音频也没用"）。
+        必须先 terminate/initialize 强制重枚举，才能让不带 device 参数的新流
+        落到**当前**系统默认设备上。
+        """
+        key = self._current_default_device_key()
+        if key is None:
+            return
+        if self._open_default_device_key is not None and key != self._open_default_device_key:
+            print("[SoundDeviceEngine] 默认输出设备已变化，开流前刷新 PortAudio 设备表")
+            refresh_portaudio_devices()
+        self._open_default_device_key = key
+
+    def _check_default_device_changed(self) -> None:
+        """比对当前系统默认输出设备与流绑定的设备，变化则触发热重载。"""
+        key = self._current_default_device_key()
+        if key is None:
+            return
+        if self._open_default_device_key is None:
+            # 基线尚未建立（刚注入 provider / 刚 release / 首次开流前）
+            self._open_default_device_key = key
+            return
+        if key != self._open_default_device_key:
+            print("[SoundDeviceEngine] 检测到默认输出设备切换，准备迁移输出端点...")
+            self._perform_hot_recovery()
+
+    def _default_device_poll_due(self) -> bool:
+        """默认设备轮询节流：间隔 _DEFAULT_DEVICE_POLL_INTERVAL 秒至多一次。"""
+        now = time.monotonic()
+        if now - self._last_device_poll_ts < _DEFAULT_DEVICE_POLL_INTERVAL:
+            return False
+        self._last_device_poll_ts = now
+        return True
+
     # ==================== 内部：流 / Producer / 回调 ====================
 
     def _start_streaming(self) -> None:
@@ -542,6 +646,12 @@ class SoundDeviceEngine(IAudioEngine):
 
         # 防御性清理：绝对不允许同一个实例开启两个 stream
         self._stop_streaming()
+
+        # 对齐默认设备基线：自上次开流以来默认设备若已变化（含 load() 重载
+        # 场景，#126），先刷新 PortAudio 设备表再开流，避免新流仍绑在旧
+        # 默认设备上——此时本引擎的流已关闭，刷新只会联动关闭键音/节拍器
+        # 的流池，随后按需重建。
+        self._align_default_device_before_open()
 
         # 启动 producer
         self._producer_stop.clear()
@@ -652,6 +762,12 @@ class SoundDeviceEngine(IAudioEngine):
                 if self._needs_recovery.is_set() or not self._stream.active:
                     self._perform_hot_recovery()
                     continue
+
+            # 0.5) 默认输出设备轮询（节流）：暂停/停止状态也要跟踪——流在
+            # 整个文件生命周期内保持存活，停止期间切的设备不会触发 play()
+            # 的补建分支（_stream.active 仍为 True），只能在这里发现。
+            if self._default_device_poll_due():
+                self._check_default_device_changed()
 
             # 1) 检查待切换的速度
             self._maybe_swap_active_speed()
@@ -765,11 +881,12 @@ class SoundDeviceEngine(IAudioEngine):
             self._state = PlaybackState.PAUSED
 
     def _perform_hot_recovery(self) -> None:
-        """执行音频流热重载（断线重连）
+        """执行音频流热重载（断线重连 / 默认设备切换）
 
-        当检测到底层设备异常（如采样率突变、设备拔插）时，
-        静默销毁旧流 -> 等待设备稳定 -> 创建新流 -> 恢复播放进度。
-        整个过程对用户来说只是短暂卡顿，然后自动恢复正常。
+        当检测到底层设备异常（如采样率突变、设备拔插），或系统默认输出
+        设备变化（#126，producer 轮询发现）时：静默销毁旧流 → 等待设备
+        稳定 → 刷新 PortAudio 设备表 → 在新默认设备上创建新流 → 恢复
+        播放进度。整个过程对用户来说只是短暂卡顿，然后自动恢复正常。
         """
         print("[SoundDeviceEngine] 正在执行音频流热重载...")
         self._needs_recovery.clear()
@@ -790,9 +907,15 @@ class SoundDeviceEngine(IAudioEngine):
         # (比如蓝牙切换协议通常需要几百毫秒)
         time.sleep(0.5)
 
-        # 4. 尝试重新开启流并恢复进度
+        # 3.5) 停机守卫：release()/load() 已要求停机时没必要刷新设备表/重建流
         if self._producer_stop.is_set():
             return
+
+        # 3.6) 刷新 PortAudio 设备表：macOS 上设备表在 Pa_Initialize 后不再
+        # 自动更新，重开流必须先 terminate/initialize 才能解析到**当前**的
+        # 默认设备（#126）。该调用会先让进程内其它 PortAudio 使用方
+        # （键音/节拍器流池）关闭各自的流，避免 Pa_Terminate 摧毁在开的流。
+        refresh_portaudio_devices()
 
         try:
             self._stream = sd.OutputStream(
@@ -819,6 +942,11 @@ class SoundDeviceEngine(IAudioEngine):
             # 更新硬件延迟补偿帧数（新设备的 latency 可能与旧设备不同）
             actual_latency_s = self._stream.latency
             self._stream_latency_frames = int(actual_latency_s * self._sample_rate)
+            # 更新默认设备基线（新流已绑定刷新后的默认设备），避免恢复完成
+            # 后轮询再次判定"变化"造成循环恢复
+            new_key = self._current_default_device_key()
+            if new_key is not None:
+                self._open_default_device_key = new_key
             print(
                 f"[SoundDeviceEngine] 热重载 stream: "
                 f"actual latency={actual_latency_s*1000:.1f}ms "
