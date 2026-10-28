@@ -6493,53 +6493,130 @@ class EditorInterface(QWidget):
             self._show_classic_char_editor(line_idx, char_idx, sentence)
             return
 
-        before_character = deepcopy(sentence.characters[char_idx])
+        edit_line_idx = line_idx
+        edit_char_idx = char_idx
+        # RhythmicaLyrics opens F2 at the end of the current ruby. A right
+        # move opens the next ruby at its start; every other direction opens
+        # at the end so reverse navigation takes a single key press.
+        cursor_position = "end"
+        last_updated_char: str | None = None
 
-        def _toggle_link_from_popup() -> None:
-            nonlocal before_character
-            self._toggle_word_join_single(line_idx, char_idx)
-            # The F3-compatible action owns its own undo command. If ruby is
-            # saved afterwards, its undo snapshot must preserve this new link.
-            before_character = deepcopy(
-                self._project.sentences[line_idx].characters[char_idx]
-            )
+        while True:
+            sentence = self._project.sentences[edit_line_idx]
+            before_character = deepcopy(sentence.characters[edit_char_idx])
 
-        dialog = RubyEditPopup(
-            sentence.characters[char_idx],
-            can_link_next=char_idx < len(sentence.characters) - 1,
-            parent=self,
-            link_toggle_callback=_toggle_link_from_popup,
-        )
-        anchor = self.preview.character_global_rect(line_idx, char_idx)
-        if anchor is None:
-            self.preview.repaint()
-            anchor = self.preview.character_global_rect(line_idx, char_idx)
-        if anchor is None:
-            preview_top_left = self.preview.mapToGlobal(self.preview.rect().topLeft())
-            anchor = QRect(preview_top_left, self.preview.rect().size())
-        dialog.show_above(anchor)
-        if dialog.was_modified():
-            command_manager = (
-                self._timing_service.command_manager
-                if self._timing_service
-                else None
-            )
-            if command_manager is not None:
-                desc = f"编辑注音（第 {line_idx + 1} 句 第 {char_idx + 1} 字）"
-                cmd = CharacterSnapshotCommand(
-                    self._project,
-                    line_idx,
-                    char_idx,
-                    before_character,
-                    sentence.characters[char_idx],
-                    desc,
+            def _toggle_link_from_popup(
+                target_line_idx: int = edit_line_idx,
+                target_char_idx: int = edit_char_idx,
+            ) -> None:
+                nonlocal before_character
+                self._toggle_word_join_single(target_line_idx, target_char_idx)
+                # The link action owns its own undo command. If ruby is saved
+                # afterwards, its undo snapshot must preserve this new state.
+                before_character = deepcopy(
+                    self._project.sentences[target_line_idx].characters[
+                        target_char_idx
+                    ]
                 )
-                command_manager.execute(cmd)
 
+            def _toggle_word_join_shortcut_from_popup(
+                target_line_idx: int = edit_line_idx,
+                target_char_idx: int = edit_char_idx,
+            ) -> None:
+                nonlocal before_character
+                # Invoke the ordinary word-join action so a retained selection
+                # keeps the same single/range behavior as outside the popup.
+                self._toggle_word_join()
+                # The shortcut owns its undo command. A later ruby edit must
+                # preserve the resulting link state in its own snapshot.
+                before_character = deepcopy(
+                    self._project.sentences[target_line_idx].characters[
+                        target_char_idx
+                    ]
+                )
+
+            navigation_targets = {
+                direction: target
+                for direction in ("left", "up", "right", "down")
+                if (
+                    target := self._ruby_navigation_target(
+                        edit_line_idx, edit_char_idx, direction
+                    )
+                )
+                is not None
+            }
+            dialog = RubyEditPopup(
+                sentence.characters[edit_char_idx],
+                can_link_next=edit_char_idx < len(sentence.characters) - 1,
+                parent=self,
+                link_toggle_callback=_toggle_link_from_popup,
+                word_join_shortcut_callback=(
+                    _toggle_word_join_shortcut_from_popup
+                ),
+                word_join_shortcut_resolver=(
+                    self._resolve_word_join_shortcut
+                ),
+                shortcut_long_press_ms=self._long_press_timer.interval(),
+                navigation_directions=navigation_targets,
+                initial_cursor_position=cursor_position,
+            )
+            anchor = self.preview.character_global_rect(
+                edit_line_idx, edit_char_idx
+            )
+            if anchor is None:
+                self.preview.repaint()
+                anchor = self.preview.character_global_rect(
+                    edit_line_idx, edit_char_idx
+                )
+            if anchor is None:
+                preview_top_left = self.preview.mapToGlobal(
+                    self.preview.rect().topLeft()
+                )
+                anchor = QRect(preview_top_left, self.preview.rect().size())
+            dialog.show_above(anchor)
+
+            if dialog.was_modified():
+                command_manager = (
+                    self._timing_service.command_manager
+                    if self._timing_service
+                    else None
+                )
+                if command_manager is not None:
+                    desc = (
+                        f"编辑注音（第 {edit_line_idx + 1} 句 "
+                        f"第 {edit_char_idx + 1} 字）"
+                    )
+                    cmd = CharacterSnapshotCommand(
+                        self._project,
+                        edit_line_idx,
+                        edit_char_idx,
+                        before_character,
+                        sentence.characters[edit_char_idx],
+                        desc,
+                    )
+                    command_manager.execute(cmd)
+                last_updated_char = sentence.chars[edit_char_idx]
+                # Refresh synchronously before locating the next popup: ruby
+                # width can change the rendered character rectangles.
+                self._finish_inline_ruby_edit(edit_line_idx)
+
+            direction = dialog.navigation_request()
+            target = navigation_targets.get(direction) if direction else None
+            if target is None:
+                break
+
+            previous_line_idx = edit_line_idx
+            edit_line_idx, edit_char_idx = target
+            self._focus_inline_ruby_target(
+                previous_line_idx, edit_line_idx, edit_char_idx
+            )
+            cursor_position = "start" if direction == "right" else "end"
+
+        if last_updated_char is not None:
             InfoBar.success(
                 title=self.tr("注音已更新"),
                 content=self.tr("已应用「{char}」的注音").format(
-                    char=sentence.chars[char_idx]
+                    char=last_updated_char
                 ),
                 orient=Qt.Orientation.Horizontal,
                 isClosable=True,
@@ -6547,9 +6624,118 @@ class EditorInterface(QWidget):
                 duration=1400,
                 parent=self,
             )
-            QTimer.singleShot(
-                0, lambda li=line_idx: self._finish_inline_ruby_edit(li)
+
+    def _resolve_word_join_shortcut(
+        self, event: QKeyEvent
+    ) -> tuple[bool, bool, bool]:
+        """Resolve the active configured shortcut for the word-join action.
+
+        Returns ``(short_is_word_join, long_is_word_join, has_long_action)``.
+        The third value preserves the editor's short-vs-long timing semantics
+        when the same physical key has another action on long press.
+        """
+        key_name = self._qt_key_to_name(
+            event.key(),
+            event.modifiers(),
+            event.nativeVirtualKey(),
+            event.nativeScanCode(),
+        )
+        if not key_name:
+            return False, False, False
+
+        key_upper = key_name.upper()
+        action_short = getattr(self, "_key_map_short", {}).get(key_upper)
+        action_long = getattr(self, "_key_map_long", {}).get(key_upper)
+        if (
+            not self._settings_loaded
+            and action_short is None
+            and action_long is None
+        ):
+            playing = bool(
+                self._timing_service and self._timing_service.is_playing()
             )
+            action_short = self._default_key_action(
+                event.key(), event.modifiers(), playing=playing
+            )
+
+        return (
+            action_short == "toggle_word_join",
+            action_long == "toggle_word_join",
+            action_long is not None,
+        )
+
+    def _ruby_navigation_target(
+        self, line_idx: int, char_idx: int, direction: str
+    ) -> tuple[int, int] | None:
+        """Resolve one F2 popup arrow move in lyric-character coordinates."""
+        if not self._project or not 0 <= line_idx < len(self._project.sentences):
+            return None
+        sentence = self._project.sentences[line_idx]
+        if not 0 <= char_idx < len(sentence.characters):
+            return None
+
+        if direction == "left":
+            if char_idx > 0:
+                return line_idx, char_idx - 1
+            target_line = self._project.find_prev_line_with_characters(line_idx)
+            if target_line < 0:
+                return None
+            return (
+                target_line,
+                len(self._project.sentences[target_line].characters) - 1,
+            )
+
+        if direction == "right":
+            if char_idx < len(sentence.characters) - 1:
+                return line_idx, char_idx + 1
+            target_line = self._project.find_next_line_with_characters(line_idx)
+            return (target_line, 0) if target_line >= 0 else None
+
+        if direction in {"up", "down"}:
+            target_line = (
+                self._project.find_prev_line_with_characters(line_idx)
+                if direction == "up"
+                else self._project.find_next_line_with_characters(line_idx)
+            )
+            if target_line < 0:
+                return None
+            # Keep RhythmicaLyrics' logical source-character column. Ruby
+            # widths and proportional glyphs do not change character ownership.
+            target_chars = self._project.sentences[target_line].characters
+            return target_line, min(char_idx, len(target_chars) - 1)
+
+        return None
+
+    def _focus_inline_ruby_target(
+        self, previous_line_idx: int, line_idx: int, char_idx: int
+    ) -> None:
+        """Synchronize preview focus/current domains before reopening F2."""
+        if line_idx != previous_line_idx:
+            self._validate_line_timestamps(previous_line_idx)
+
+        self.preview.set_focus_position(line_idx, char_idx)
+        self._current_line_idx = line_idx
+        if self._timing_service:
+            self._suppress_cp_cursor_move = True
+            try:
+                self._timing_service.move_to_checkpoint(
+                    line_idx, char_idx, 0, prefer_backward=True
+                )
+            finally:
+                self._suppress_cp_cursor_move = False
+            pos = self._timing_service.get_current_position()
+            self.preview._current_char_idx = pos.char_idx
+            self.preview._current_line_idx = line_idx
+            self.preview.scroll_current_line_to_center()
+        else:
+            self.preview.set_current_position(line_idx, char_idx)
+
+        self._update_line_info()
+        self._update_time_tags_display()
+        self._update_status()
+        # ``repaint`` makes the target hitbox available before the next modal
+        # popup is positioned, including after a cross-line scroll.
+        self.preview.repaint()
 
     def _show_classic_char_editor(
         self, line_idx: int, char_idx: int, sentence: Sentence

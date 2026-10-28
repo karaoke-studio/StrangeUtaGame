@@ -6,6 +6,26 @@ from PyQt6.QtCore import QEvent, QObject, Qt
 from PyQt6.QtWidgets import QApplication, QDialog
 
 
+def install_frameless_native_sibling_guard(app: QApplication) -> None:
+    """Prevent native child widgets from promoting their siblings.
+
+    qfluentwidgets mask dialogs are child widgets rather than real top-level
+    windows.  Calling ``winId()`` on one of them makes it native; without this
+    application attribute Qt also promotes sibling widgets such as the custom
+    title bar and page stack.  Those native siblings intercept Windows mouse
+    handling and can leave title-bar maximize/restore and edge resizing broken
+    after the dialog closes.
+
+    This is a standalone-window policy.  Embedded hosts own their
+    ``QApplication`` and must opt in themselves instead of being mutated by
+    :class:`MainWindow`.
+    """
+    app.setAttribute(
+        Qt.ApplicationAttribute.AA_DontCreateNativeWidgetSiblings,
+        True,
+    )
+
+
 class _NonModalDialogFilter(QObject):
     """Remove modality just before Qt shows any dialog.
 

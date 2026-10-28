@@ -1,9 +1,8 @@
 from types import SimpleNamespace
 
 import pytest
-
 from PyQt6.QtCore import QEvent, QRect, Qt, QTimer
-from PyQt6.QtGui import QKeyEvent
+from PyQt6.QtGui import QInputMethodEvent, QKeyEvent
 from PyQt6.QtTest import QTest
 from PyQt6.QtWidgets import QApplication, QDialog
 
@@ -141,9 +140,7 @@ def test_show_above_preserves_save_and_cancel(qapp, monkeypatch, platform, key):
 
 
 @pytest.mark.parametrize("key", [Qt.Key.Key_Return, Qt.Key.Key_Escape])
-def test_close_before_opening_callback_keeps_dialog_closed(
-    qapp, monkeypatch, key
-):
+def test_close_before_opening_callback_keeps_dialog_closed(qapp, monkeypatch, key):
     monkeypatch.setattr(ruby_popup, "sys", SimpleNamespace(platform="darwin"))
     character = _character()
     original_ruby = character.ruby
@@ -301,16 +298,275 @@ def test_link_button_delegates_each_toggle_and_tracks_character(qapp, monkeypatc
     assert popup.btn_link_next.isChecked() is False
 
 
+def test_remapped_word_join_shortcut_works_without_closing_popup(qapp, monkeypatch):
+    character = _character()
+    calls = []
+
+    def toggle_like_bare_f3():
+        character.linked_to_next = not character.linked_to_next
+        calls.append(character.linked_to_next)
+
+    popup = _popup(
+        monkeypatch,
+        character,
+        can_link_next=True,
+        word_join_shortcut_callback=toggle_like_bare_f3,
+        word_join_shortcut_resolver=lambda event: (
+            event.key() == Qt.Key.Key_F6,
+            False,
+            False,
+        ),
+    )
+
+    QApplication.sendEvent(
+        popup.edit_ruby,
+        QKeyEvent(
+            QEvent.Type.KeyPress,
+            Qt.Key.Key_F3,
+            Qt.KeyboardModifier.NoModifier,
+        ),
+    )
+    assert calls == []
+
+    for expected in (True, False):
+        QApplication.sendEvent(
+            popup.edit_ruby,
+            QKeyEvent(
+                QEvent.Type.KeyPress,
+                Qt.Key.Key_F6,
+                Qt.KeyboardModifier.NoModifier,
+            ),
+        )
+        assert popup.btn_link_next.isChecked() is expected
+
+    popup.show()
+    popup.btn_link_next.setFocus()
+    QTest.keyClick(popup.btn_link_next, Qt.Key.Key_F6)
+
+    assert calls == [True, False, True]
+    assert popup.btn_link_next.isChecked() is True
+    assert popup._finished is False
+    assert popup.navigation_request() is None
+
+
+def test_long_word_join_shortcut_waits_for_hold_threshold(qapp, monkeypatch):
+    character = _character()
+    calls = []
+
+    def toggle_link():
+        character.linked_to_next = not character.linked_to_next
+        calls.append(character.linked_to_next)
+
+    popup = _popup(
+        monkeypatch,
+        character,
+        can_link_next=True,
+        word_join_shortcut_callback=toggle_link,
+        word_join_shortcut_resolver=lambda event: (
+            False,
+            event.key() == Qt.Key.Key_F6,
+            event.key() == Qt.Key.Key_F6,
+        ),
+        shortcut_long_press_ms=20,
+    )
+    popup.show()
+
+    QTest.keyPress(popup.edit_ruby, Qt.Key.Key_F6)
+    assert calls == []
+    QTest.qWait(30)
+    assert calls == [True]
+    QTest.keyRelease(popup.edit_ruby, Qt.Key.Key_F6)
+
+    assert calls == [True]
+    assert popup._finished is False
+
+
 def test_ruby_input_accepts_unrestricted_ime_text(qapp, monkeypatch):
     popup = _popup(monkeypatch, can_link_next=True)
 
-    assert popup.edit_ruby.testAttribute(
-        Qt.WidgetAttribute.WA_InputMethodEnabled
-    )
+    assert popup.edit_ruby.testAttribute(Qt.WidgetAttribute.WA_InputMethodEnabled)
     assert popup.edit_ruby.inputMethodHints() == Qt.InputMethodHint.ImhNone
 
     popup.edit_ruby.setText("かな・拼音・한글・ruby")
     assert popup.edit_ruby.text() == "かな・拼音・한글・ruby"
+
+
+@pytest.mark.parametrize(
+    ("key", "cursor", "direction"),
+    [
+        (Qt.Key.Key_Left, 0, "left"),
+        (Qt.Key.Key_Up, 1, "up"),
+        (Qt.Key.Key_Right, len("きょ,う"), "right"),
+        (Qt.Key.Key_Down, 1, "down"),
+    ],
+)
+def test_arrow_requests_navigation_at_input_boundary(
+    qapp, monkeypatch, key, cursor, direction
+):
+    popup = _popup(
+        monkeypatch,
+        can_link_next=True,
+        navigation_directions={"left", "up", "right", "down"},
+    )
+    popup.edit_ruby.setCursorPosition(cursor)
+
+    QApplication.sendEvent(
+        popup.edit_ruby,
+        QKeyEvent(
+            QEvent.Type.KeyPress,
+            key,
+            Qt.KeyboardModifier.NoModifier,
+        ),
+    )
+
+    assert popup.navigation_request() == direction
+    assert popup.result() == QDialog.DialogCode.Accepted
+
+
+def test_arrow_navigation_saves_current_ruby_before_switch(qapp, monkeypatch):
+    character = _character()
+    popup = _popup(
+        monkeypatch,
+        character,
+        can_link_next=True,
+        navigation_directions={"right"},
+    )
+    popup.edit_ruby.setText("い,ま")
+    popup.edit_ruby.setCursorPosition(len(popup.edit_ruby.text()))
+
+    QApplication.sendEvent(
+        popup.edit_ruby,
+        QKeyEvent(
+            QEvent.Type.KeyPress,
+            Qt.Key.Key_Right,
+            Qt.KeyboardModifier.NoModifier,
+        ),
+    )
+
+    assert popup.navigation_request() == "right"
+    assert popup.was_modified()
+    assert [part.text for part in character.ruby.parts] == ["い", "ま"]
+
+
+def test_empty_ruby_can_navigate_in_either_horizontal_direction(qapp, monkeypatch):
+    for key, direction in (
+        (Qt.Key.Key_Left, "left"),
+        (Qt.Key.Key_Right, "right"),
+    ):
+        popup = _popup(
+            monkeypatch,
+            Character(char="の", check_count=1),
+            can_link_next=True,
+            navigation_directions={"left", "right"},
+        )
+
+        QApplication.sendEvent(
+            popup.edit_ruby,
+            QKeyEvent(
+                QEvent.Type.KeyPress,
+                key,
+                Qt.KeyboardModifier.NoModifier,
+            ),
+        )
+
+        assert popup.navigation_request() == direction
+
+
+@pytest.mark.parametrize(
+    ("key", "cursor"),
+    [
+        (Qt.Key.Key_Left, 2),
+        (Qt.Key.Key_Right, 2),
+    ],
+)
+def test_horizontal_arrow_keeps_editing_inside_ruby(qapp, monkeypatch, key, cursor):
+    popup = _popup(
+        monkeypatch,
+        can_link_next=True,
+        navigation_directions={"left", "right"},
+    )
+    popup.edit_ruby.setCursorPosition(cursor)
+
+    QApplication.sendEvent(
+        popup.edit_ruby,
+        QKeyEvent(
+            QEvent.Type.KeyPress,
+            key,
+            Qt.KeyboardModifier.NoModifier,
+        ),
+    )
+
+    assert popup.navigation_request() is None
+    assert popup._finished is False
+
+
+def test_horizontal_arrow_does_not_navigate_with_selection(qapp, monkeypatch):
+    popup = _popup(
+        monkeypatch,
+        can_link_next=True,
+        navigation_directions={"right"},
+    )
+    popup.edit_ruby.selectAll()
+
+    QApplication.sendEvent(
+        popup.edit_ruby,
+        QKeyEvent(
+            QEvent.Type.KeyPress,
+            Qt.Key.Key_Right,
+            Qt.KeyboardModifier.NoModifier,
+        ),
+    )
+
+    assert popup.navigation_request() is None
+    assert popup._finished is False
+
+
+def test_arrow_navigation_ignores_ime_preedit(qapp, monkeypatch):
+    popup = _popup(
+        monkeypatch,
+        can_link_next=True,
+        navigation_directions={"right"},
+    )
+    popup.edit_ruby.setCursorPosition(len(popup.edit_ruby.text()))
+    QApplication.sendEvent(
+        popup.edit_ruby,
+        QInputMethodEvent("かな", []),
+    )
+
+    QApplication.sendEvent(
+        popup.edit_ruby,
+        QKeyEvent(
+            QEvent.Type.KeyPress,
+            Qt.Key.Key_Right,
+            Qt.KeyboardModifier.NoModifier,
+        ),
+    )
+
+    assert popup.navigation_request() is None
+    assert popup._finished is False
+
+
+@pytest.mark.parametrize(
+    ("position", "expected_cursor", "selected"),
+    [
+        ("start", 0, False),
+        ("end", len("きょ,う"), False),
+        ("select_all", len("きょ,う"), True),
+    ],
+)
+def test_initial_cursor_position(
+    qapp, monkeypatch, position, expected_cursor, selected
+):
+    popup = _popup(
+        monkeypatch,
+        can_link_next=True,
+        initial_cursor_position=position,
+    )
+
+    popup._activate_ruby_input()
+
+    assert popup.edit_ruby.cursorPosition() == expected_cursor
+    assert popup.edit_ruby.hasSelectedText() is selected
 
 
 def test_link_button_expands_for_wider_translation(qapp, monkeypatch):

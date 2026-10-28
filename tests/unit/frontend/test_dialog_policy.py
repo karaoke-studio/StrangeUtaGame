@@ -1,7 +1,44 @@
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtWidgets import QDialog, QWidget
 
-from strange_uta_game.frontend.dialog_policy import install_non_modal_dialog_policy
+from strange_uta_game.frontend.dialog_policy import (
+    install_frameless_native_sibling_guard,
+    install_non_modal_dialog_policy,
+)
+
+
+def test_native_child_does_not_promote_sibling_widgets(qapp):
+    application_attribute = (
+        Qt.ApplicationAttribute.AA_DontCreateNativeWidgetSiblings
+    )
+    native_widget_attribute = Qt.WidgetAttribute.WA_NativeWindow
+    previous = qapp.testAttribute(application_attribute)
+
+    parent = QWidget()
+    title_bar = QWidget(parent)
+    page_stack = QWidget(parent)
+    mask_dialog = QDialog(parent)
+    mask_dialog.setWindowFlags(Qt.WindowType.FramelessWindowHint)
+
+    try:
+        qapp.setAttribute(application_attribute, False)
+        install_frameless_native_sibling_guard(qapp)
+        install_frameless_native_sibling_guard(qapp)
+
+        assert qapp.testAttribute(application_attribute)
+        assert not mask_dialog.isWindow()
+        assert not title_bar.testAttribute(native_widget_attribute)
+        assert not page_stack.testAttribute(native_widget_attribute)
+
+        mask_dialog.winId()
+
+        assert mask_dialog.testAttribute(native_widget_attribute)
+        assert not title_bar.testAttribute(native_widget_attribute)
+        assert not page_stack.testAttribute(native_widget_attribute)
+    finally:
+        mask_dialog.close()
+        parent.close()
+        qapp.setAttribute(application_attribute, previous)
 
 
 def test_exec_dialog_does_not_become_application_modal(qapp):
