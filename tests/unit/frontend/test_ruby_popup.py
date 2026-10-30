@@ -1,3 +1,4 @@
+from copy import deepcopy
 from types import SimpleNamespace
 
 import pytest
@@ -347,6 +348,33 @@ def test_remapped_word_join_shortcut_works_without_closing_popup(qapp, monkeypat
     assert popup.btn_link_next.isChecked() is True
     assert popup._finished is False
     assert popup.navigation_request() is None
+
+
+def test_word_join_shortcut_rebinds_replaced_character_before_save(qapp, monkeypatch):
+    original = _character()
+    current = [original]
+
+    def replace_like_structural_edit():
+        replacement = deepcopy(current[0])
+        replacement.linked_to_next = True
+        current[0] = replacement
+
+    popup = _popup(
+        monkeypatch,
+        original,
+        can_link_next=True,
+        character_provider=lambda: current[0],
+        word_join_shortcut_callback=replace_like_structural_edit,
+    )
+
+    popup._trigger_word_join_shortcut()
+    popup.edit_ruby.setText("い,ま")
+    popup._apply()
+
+    assert current[0] is not original
+    assert current[0].linked_to_next is True
+    assert [part.text for part in current[0].ruby.parts] == ["い", "ま"]
+    assert [part.text for part in original.ruby.parts] == ["きょ", "う"]
 
 
 def test_long_word_join_shortcut_waits_for_hold_threshold(qapp, monkeypatch):

@@ -6505,6 +6505,14 @@ class EditorInterface(QWidget):
             sentence = self._project.sentences[edit_line_idx]
             before_character = deepcopy(sentence.characters[edit_char_idx])
 
+            def _current_character(
+                target_line_idx: int = edit_line_idx,
+                target_char_idx: int = edit_char_idx,
+            ) -> Character:
+                return self._project.sentences[target_line_idx].characters[
+                    target_char_idx
+                ]
+
             def _toggle_link_from_popup(
                 target_line_idx: int = edit_line_idx,
                 target_char_idx: int = edit_char_idx,
@@ -6513,11 +6521,7 @@ class EditorInterface(QWidget):
                 self._toggle_word_join_single(target_line_idx, target_char_idx)
                 # The link action owns its own undo command. If ruby is saved
                 # afterwards, its undo snapshot must preserve this new state.
-                before_character = deepcopy(
-                    self._project.sentences[target_line_idx].characters[
-                        target_char_idx
-                    ]
-                )
+                before_character = deepcopy(_current_character())
 
             def _toggle_word_join_shortcut_from_popup(
                 target_line_idx: int = edit_line_idx,
@@ -6529,11 +6533,7 @@ class EditorInterface(QWidget):
                 self._toggle_word_join()
                 # The shortcut owns its undo command. A later ruby edit must
                 # preserve the resulting link state in its own snapshot.
-                before_character = deepcopy(
-                    self._project.sentences[target_line_idx].characters[
-                        target_char_idx
-                    ]
-                )
+                before_character = deepcopy(_current_character())
 
             navigation_targets = {
                 direction: target
@@ -6549,6 +6549,7 @@ class EditorInterface(QWidget):
                 sentence.characters[edit_char_idx],
                 can_link_next=edit_char_idx < len(sentence.characters) - 1,
                 parent=self,
+                character_provider=_current_character,
                 link_toggle_callback=_toggle_link_from_popup,
                 word_join_shortcut_callback=(
                     _toggle_word_join_shortcut_from_popup
@@ -6576,6 +6577,7 @@ class EditorInterface(QWidget):
             dialog.show_above(anchor)
 
             if dialog.was_modified():
+                current_character = _current_character()
                 command_manager = (
                     self._timing_service.command_manager
                     if self._timing_service
@@ -6591,11 +6593,11 @@ class EditorInterface(QWidget):
                         edit_line_idx,
                         edit_char_idx,
                         before_character,
-                        sentence.characters[edit_char_idx],
+                        current_character,
                         desc,
                     )
                     command_manager.execute(cmd)
-                last_updated_char = sentence.chars[edit_char_idx]
+                last_updated_char = current_character.char
                 # Refresh synchronously before locating the next popup: ruby
                 # width can change the rendered character rectangles.
                 self._finish_inline_ruby_edit(edit_line_idx)

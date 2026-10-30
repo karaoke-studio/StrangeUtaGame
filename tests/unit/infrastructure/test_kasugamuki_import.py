@@ -549,6 +549,65 @@ def test_literal_backslash_before_role_text_is_preserved():
     assert sentences_from_kasugamuki(exported, SINGER_ID)[0].text == source
 
 
+def test_literal_backslash_runs_roundtrip_in_both_krl_layers():
+    """顶层词法会消费 ``\\\\``，因此导出端必须编码每个字面反斜杠。"""
+    from strange_uta_game.backend.domain.models import Character
+
+    for slash_count in (1, 2):
+        slash_run = "\\" * slash_count
+        source = f"a{slash_run}b"
+        chars = [
+            Character(char=ch, check_count=0, singer_id=SINGER_ID)
+            for ch in source
+        ]
+        sentence = _mk_sentence(chars)
+        expected_slashes = "\\" * (slash_count * 2)
+        expected = f"a{expected_slashes}b"
+
+        for exported in (
+            sentences_to_kasugamuki([sentence]),
+            sentences_to_kasugamuki_romaji([sentence]),
+        ):
+            assert exported == expected
+            assert sentences_from_kasugamuki(exported, SINGER_ID)[0].text == source
+
+
+def test_multiple_backslashes_before_literal_role_text_roundtrip():
+    """反斜杠逐个编码后，再追加 ``\\【`` 保护字面角色标签。"""
+    from strange_uta_game.backend.domain.models import Character
+
+    source = "\\\\【@chorus】"
+    chars = [
+        Character(char=ch, check_count=0, singer_id=SINGER_ID)
+        for ch in source
+    ]
+    sentence = _mk_sentence(chars)
+    expected = "\\" * 5 + "【@chorus】"
+
+    assert sentences_to_kasugamuki([sentence]) == expected
+    assert sentences_to_kasugamuki_romaji([sentence]) == expected
+    assert sentences_from_kasugamuki(expected, SINGER_ID)[0].text == source
+
+
+def test_backslashes_inside_ruby_block_are_not_top_level_escaped():
+    """Player 会先整体消费注音块，块内反斜杠必须保持原文。"""
+    from strange_uta_game.backend.domain.models import Character, Ruby, RubyPart
+
+    character = Character(
+        char="\\",
+        check_count=1,
+        ruby=Ruby(parts=[RubyPart(text="a\\b")]),
+        singer_id=SINGER_ID,
+    )
+    exported = sentences_to_kasugamuki([_mk_sentence([character])])
+
+    assert exported == r"{\|a\b}"
+    reparsed = sentences_from_kasugamuki(exported, SINGER_ID)[0].characters[0]
+    assert reparsed.char == "\\"
+    assert reparsed.ruby is not None
+    assert reparsed.ruby.text == "a\\b"
+
+
 def test_role_shaped_text_inside_ruby_block_needs_no_escape():
     """注音块内部不会按角色标签词法解析，不能凭文本误加可见反斜杠。"""
     from strange_uta_game.backend.domain.models import Character, Ruby, RubyPart
