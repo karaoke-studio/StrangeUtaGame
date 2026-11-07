@@ -645,6 +645,9 @@ class NicokaraWithRubyExporter(NicokaraExporter):
                     跨行回退时钳制不超过本行内其后的第一个 ts）
               pos2 = 段尾字 sentence_end_ts（若是演唱停顿）
                     / 本句下一字起始 ts / 本句后续释放 ts（如行尾 [>..]）
+              按文本顺序取第一个「不早于本段已唱到的位置」的时间事件；
+              早于该位置的事件属于与主歌词重叠的另一层（如括号内合唱
+              先行录入），必须跳过，不能拿来闭段。
               跨行借用（下一行首 ts）仅为最后手段，且钳制 pos2 >= pos1：
               重叠歌词（下一行先于本行结束开始）时下一行首 ts 远早于
               本行真实结束，直接借用会压垮 ruby 作用域（ココ☆ナツ案例）。
@@ -798,17 +801,30 @@ class NicokaraWithRubyExporter(NicokaraExporter):
                 if last_ch.is_sentence_end and last_ch.global_sentence_end_ts is not None:
                     pos2_ts = last_ch.global_sentence_end_ts
                 else:
-                    # 先在本句剩余 char 找下一个有起始 ts 的
+                    # 本段的时间下界：段首字的起始 ts。文本顺序在后的字
+                    # 若给出比这更早的时间事件，说明那属于与主歌词重叠的
+                    # 另一层（典型：括号内合唱 `(Oh Fu-Fu！)` 的 `O` 早于
+                    # 「力」录入），不能当作本段的闭段点。
+                    group_floor = pos1_ts if pos1_ts is not None else 0
+
+                    # 按文本顺序找第一个「不早于本段起点」的时间事件：
+                    #   - 后续字有起始 ts → 用起始 ts（下一字开始 = 本段结束）
+                    #   - 后续无起始 ts 的字只有释放 ts（如 `！` 的停顿释放）
+                    #     → 用释放 ts 闭段（本行主歌词自己的收尾）
+                    # 重叠层事件（cand < group_floor）直接跳过，不得用
+                    # 后面的倒挂钳制把作用域压成 pos1 == pos2 的空区间。
                     for k in range(end_idx, n):
+                        cand: Optional[int] = None
                         if chars[k].global_timestamps:
-                            pos2_ts = chars[k].global_timestamps[0]
-                            break
-                    if pos2_ts is None:
-                        # 本句剩余 char 无起始 ts → 本句自身的释放 ts 闭段
-                        for k in range(end_idx, n):
-                            if chars[k].global_sentence_end_ts is not None:
-                                pos2_ts = chars[k].global_sentence_end_ts
-                                break
+                            cand = chars[k].global_timestamps[0]
+                        elif chars[k].global_sentence_end_ts is not None:
+                            cand = chars[k].global_sentence_end_ts
+                        if cand is None:
+                            continue
+                        if cand < group_floor:
+                            continue
+                        pos2_ts = cand
+                        break
                     if pos2_ts is None:
                         # 本句后续完全无 ts → 跨 sentence 找后续行第一个有 ts 的 char
                         for ns in project.sentences[sent_idx + 1:]:
