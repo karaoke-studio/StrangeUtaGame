@@ -1,5 +1,35 @@
 # Changelog
 
+## [Unreleased]
+
+### 新增功能
+- **TTML / AMLL TTML 交换格式（SUG 侧前置工作）**：新增 `.ttml` 歌词导入与导出。
+  - 导入支持 AMLL TTML DB 的逐词 `<span begin/end>`、TTML2 ruby（`container` / `base` / `textContainer` / `text`）、`ttm:agent` 演唱者、`amll:meta` 曲名/艺人/专辑/语言；兼容 `begin+dur`、秒后缀 `15.8s`、`ttm:title`、空行/空句子与未命名 agent；LRC/TXT/KRA/ASS/SRT/Nicokara 等既有导入路径不变
+  - 新增 `TTML` 导出格式（AMLL TTML DB 风格，`itunes:timing="Word"`），保留逐字时间戳、ruby、演唱者、行尾释放、空行与 SUG 的 extra checkpoint / 句中停顿 / 连词 / 零节奏点 / 未打轴字符
+  - 「加载歌词」文件框、拖拽与主页导入识别 `.ttml`；主页创建项目时会保留 TTML 演唱者与曲名/艺人/专辑/语言
+  - 「加载歌词」遇到坏 `.ttml` 会先同步校验，不再先把当前项目换成空项目；剪贴板中的 TTML 不再被当普通字符插进当前行
+  - 后端 `ProjectImportService` 增加 `.ttml` 分支（文本/时间/元数据；该 API 没有 Singer 列表，多演唱者请走前端导入）
+  - 既有导出格式一个都不改：`TTML` 只追加在导出器注册表末尾
+
+### 嵌入契约
+- 新增 `MainWindow.import_ttml_from_text(content, switch_to_editor=True, force=False)` 与 `import_ttml_from_file(path, ...)`：宿主可把 AMLL TTML 文本或本地 `.ttml` 文件直接交给 SUG；先同步校验 XML/根元素，再走既有异步导入。默认保护当前项目的未保存歌词，`force=True` 才允许替换
+- 新增 `ttml_import_finished(success, message)` 信号：已受理的 TTML 异步导入完成/失败时通知宿主；同步校验失败仍直接返回 `False`
+- 新增 `ProjectMetadata.extra`：AMLL 平台 ID（ncmMusicId/qqMusicId/spotifyId/appleMusicId）、ISRC、ttmlAuthor 等随 `.sug` 持久化，并在 TTML 导出时回写为 `amll:meta`
+- 新增 `MainWindow.export_ttml_text()`：不落盘返回当前项目的 TTML 字符串；空项目/失败返回 `None`
+- TTML 导出只在序列化期间临时注册 XML 命名空间，结束后恢复，避免污染 embedded 宿主的 ElementTree 输出
+- `export_to_next_payload()` 新增 `ttml`（字符串快照）与 `ttml_meta`（title/artist/album/language/extra 纯 dict），既有键与语义保持不变；详见 `docs/EMBEDDING.md` §2.2
+
+### 测试
+- 新增 `tests/unit/infrastructure/test_ttml_roundtrip.py`：自建 TTML 与真实 AMLL TTML DB 文件（`ncm-lyrics/101126.ttml`）的 export→import→export 模型签名回环
+- 新增 `tests/unit/frontend/test_ttml_import.py`、`tests/unit/test_ttml_embedded_handoff.py`；样本来源见 `tests/fixtures/ttml/README.md`
+
+### 已知边界
+- AMLL 的 `x-bg` 背景人声、`x-translation` 翻译、`x-roman` 音译暂不进入 SUG 主文本；导入时会记录 warning 并在导入完成/主页创建项目时提示，不静默混入正文
+- 样式/字体/图片与 songPart 分区不参与 SUG 数据模型，导出时不会保留；平台 ID / ISRC / 作者等进入 `ProjectMetadata.extra` 并保留
+- 多条 `amll:meta artists` 会合并为一条；多字 base + 多段 ruby 的极端写法只保留首字读音
+- 未命名 `ttm:agent` 会以「艺人名 (agentId)」占位并提示重命名；多值 `ttm:agent` 目前只取第一个
+- 主页文本框仍显示原始 TTML 文本（解析在点击「创建项目」时进行），暂无 TTML 行数/歌词预览
+
 ## [1.7.4] - 2026-10-21
 
 ### 特性改变

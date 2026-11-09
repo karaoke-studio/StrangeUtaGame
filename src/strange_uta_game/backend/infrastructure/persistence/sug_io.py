@@ -437,6 +437,7 @@ class SugProjectParser:
                 "language": project.metadata.language,
                 "created_at": project.metadata.created_at.isoformat(),
                 "updated_at": project.metadata.updated_at.isoformat(),
+                "extra": dict(project.metadata.extra),
             },
             "audio_duration_ms": project.audio_duration_ms,
             "singers": [
@@ -540,6 +541,7 @@ class SugProjectParser:
                     pass
             return datetime.now()
 
+        extra = metadata_data.get("extra")
         metadata = ProjectMetadata(
             title=metadata_data.get("title", ""),
             artist=metadata_data.get("artist", ""),
@@ -547,6 +549,7 @@ class SugProjectParser:
             language=metadata_data.get("language", "ja"),
             created_at=_safe_datetime(metadata_data.get("created_at")),
             updated_at=_safe_datetime(metadata_data.get("updated_at")),
+            extra=dict(extra) if isinstance(extra, dict) else {},
         )
 
         # 解析演唱者

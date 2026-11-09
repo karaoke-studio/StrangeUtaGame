@@ -443,3 +443,27 @@ class TestRubyPlaceholderRoundtrip:
         loaded_ch = loaded.sentences[0].characters[0]
         assert loaded_ch.check_count == 0
         assert [p.text for p in loaded_ch.ruby.parts] == ["ゆ", "め"]
+
+
+def test_project_metadata_extra_roundtrip(tmp_path):
+    """AMLL 平台 ID 等 extra 元数据随 .sug 保存/加载，旧文件缺省为空。"""
+    project = Project()
+    project.metadata.extra = {
+        "ncmMusicId": "101126",
+        "qqMusicId": ["a", "b"],
+        "isrc": "HKG731554003",
+    }
+    project.add_sentence(Sentence.from_text("歌", project.singers[0].id))
+
+    file_path = tmp_path / "extra.sug"
+    SugProjectParser.save(project, str(file_path))
+    loaded = SugProjectParser.load(str(file_path))
+
+    assert loaded.metadata.extra == project.metadata.extra
+
+    legacy = tmp_path / "legacy.sug"
+    legacy.write_text(
+        '{"version":"0.3.0","id":"p","metadata":{},"singers":[],"sentences":[]}',
+        encoding="utf-8",
+    )
+    assert SugProjectParser.load(str(legacy)).metadata.extra == {}

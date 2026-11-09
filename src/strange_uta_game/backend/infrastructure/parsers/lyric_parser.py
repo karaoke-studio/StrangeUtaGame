@@ -1,6 +1,6 @@
 """歌词文件解析器
 
-支持 TXT、LRC（逐行/逐字/增强型）、KRA、ASS、SRT、Nicokara 格式的解析。
+支持 TXT、LRC（逐行/逐字/增强型）、KRA、ASS、SRT、Nicokara、TTML 格式的解析。
 """
 
 import logging
@@ -77,6 +77,15 @@ class ParsedLine:
     extra_checkpoints_map: Dict[int, List[int]] = field(default_factory=dict)
     gap_pause_map: Dict[int, int] = field(default_factory=dict)
     char_singer_map: Dict[int, str] = field(default_factory=dict)
+    # char_idx → 是否与下一字连词（True）。目前仅 TTML 的 SUG 扩展 role
+    # 使用；其他格式的解析结果保持默认（不改动既有行为）。
+    linked_map: Dict[int, bool] = field(default_factory=dict)
+    # char_idx → 显式节奏点数量。仅当格式本身能无歧义给出 checkpoint 数时
+    # 使用（TTML 的空 checkpoint span）；既有格式留空，行为不变。
+    check_count_map: Dict[int, int] = field(default_factory=dict)
+    # 行级演唱者显示名（TTML p 的 ttm:agent）；空 = 沿用 default_singer_id。
+    # 仅用于把 Sentence.singer_id 一并还原，避免只有 Character 带 singer。
+    line_singer_name: str = ""
 
 
 @dataclass
@@ -1686,6 +1695,10 @@ class LyricParserFactory:
             from .srt_parser import SRTParser
 
             return SRTParser()
+        elif ext == ".ttml":
+            from .ttml_parser import TTMLParser
+
+            return TTMLParser()
         else:
             raise ParseError(f"不支持的文件格式: {ext}")
 
@@ -1909,6 +1922,32 @@ def parse_to_sentences(
                         next_ch.timestamps
                     )
 
+        # 显式节奏点数量（TTML 的空 checkpoint span 等扩展格式）。只在
+        # 解析结果明确给出时覆盖；既有格式不写 check_count_map，行为不变。
+        for char_idx, count in (parsed.check_count_map or {}).items():
+            if not (0 <= char_idx < len(sentence.characters)):
+                continue
+            char = sentence.characters[char_idx]
+            if count == 0:
+                char.set_check_count(0, force=True)
+            elif count > char.check_count:
+                char.set_check_count(
+                    count, force=True, ruby_split_mode="direct"
+                )
+
+        # 显式连词标记（TTML 的 x-sug-link 等扩展格式）。只在解析结果
+        # 明确给出时覆盖；既有格式不写 linked_map，行为不变。
+        for char_idx, linked in (parsed.linked_map or {}).items():
+            if 0 <= char_idx < len(sentence.characters):
+                sentence.characters[char_idx].linked_to_next = bool(linked)
+
+        # 行级演唱者（TTML p 的 ttm:agent）：让 Sentence.singer_id 也正确，
+        # 而不是只有 Character.singer_id 带歌手。
+        if parsed.line_singer_name and name_to_id:
+            mapped_line_singer = name_to_id.get(parsed.line_singer_name)
+            if mapped_line_singer:
+                sentence.singer_id = mapped_line_singer
+
         # per-char singer：把 char_singer_map 的显示名映射成 id 后赋给 Character.singer_id。
         # 找不到映射的名字静默忽略（调用方负责保证映射齐全；缺失时回退到行级 singer_id）。
         if parsed.char_singer_map and name_to_id:
@@ -1941,7 +1980,10 @@ def parse_to_sentences(
             if parsed.line_end_ts is not None:
                 tail_char.is_sentence_end = True
                 tail_char.sentence_end_ts = parsed.line_end_ts
-                if tail_char.check_count == 0:
+                if (
+                    tail_char.check_count == 0
+                    and (parsed.check_count_map or {}).get(tail_idx) != 0
+                ):
                     tail_char.check_count = 1
                 # last_idx_with_ts 字符若被沿链转移，需要清掉它的 end_ts，
                 # 避免「锚字 + 链尾」同时持有 end_ts 导致二次导出多写一段

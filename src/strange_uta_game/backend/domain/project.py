@@ -31,6 +31,9 @@ class ProjectMetadata:
     language: str = "ja"
     created_at: datetime = field(default_factory=datetime.now)
     updated_at: datetime = field(default_factory=datetime.now)
+    # 外部格式的附加元数据（如 AMLL 的 ncmMusicId/qqMusicId/isrc）。
+    # 只存 JSON 可序列化值；缺失时为空，旧 .sug 文件保持兼容。
+    extra: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         """转换为字典（用于序列化）"""
@@ -41,11 +44,13 @@ class ProjectMetadata:
             "language": self.language,
             "created_at": self.created_at.isoformat(),
             "updated_at": self.updated_at.isoformat(),
+            "extra": dict(self.extra),
         }
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "ProjectMetadata":
         """从字典创建"""
+        extra = data.get("extra")
         return cls(
             title=data.get("title", ""),
             artist=data.get("artist", ""),
@@ -53,6 +58,7 @@ class ProjectMetadata:
             language=data.get("language", "ja"),
             created_at=datetime.fromisoformat(data.get("created_at", "")),
             updated_at=datetime.fromisoformat(data.get("updated_at", "")),
+            extra=dict(extra) if isinstance(extra, dict) else {},
         )
 
 

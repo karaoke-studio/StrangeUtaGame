@@ -36,7 +36,7 @@ AUDIO_EXTENSIONS = {
     ".m4a", ".m4b", ".aac", ".wma", ".opus", ".ape", ".ac3", ".wv",
     ".dsf", ".dff",
 }
-LYRIC_EXTENSIONS = {".lrc", ".txt", ".kra", ".krl", ".srt", ".ass"}
+LYRIC_EXTENSIONS = {".lrc", ".txt", ".kra", ".krl", ".srt", ".ass", ".ttml"}
 
 
 def classify_supported_file(file_path: str) -> str | None:
@@ -332,7 +332,7 @@ class FileLoader:
         init_dir = self._store.working_dir if self._store else ""
         path, _ = QFileDialog.getOpenFileName(
             self._editor, self._editor.tr("选择歌词文件"), init_dir,
-            self._editor.tr("歌词文件 (*.lrc *.txt *.kra *.krl *.srt *.ass);;所有文件 (*.*)"),
+            self._editor.tr("歌词文件 (*.lrc *.txt *.kra *.krl *.srt *.ass *.ttml);;所有文件 (*.*)"),
         )
         if path:
             self.load_lyrics(path, check_unsaved=False)
@@ -865,6 +865,7 @@ class FileLoader:
         # 身份校验：解析期间用户可能已打开/新建了其他项目，迟到的旧歌词
         # 不得覆盖新项目（worker 结果在提交时携带项目身份）。
         if self._lyric_target_project is not None and self._project is not self._lyric_target_project:
+            self._notify_ttml_import_finished(False, "项目已切换，本次歌词导入已取消")
             return
 
         sentences = result["sentences"]
@@ -885,6 +886,26 @@ class FileLoader:
 
         self._notify_main_window_frameless_refresh()
 
+    def _notify_ttml_import_finished(self, success: bool, message: str) -> None:
+        """把 TTML 宿主导入的异步结果通知给最近的 MainWindow。
+
+        FileLoader 不认识 MainWindow；沿 parentWidget 链查找，兼容 embedded
+        （editor.window() 会指向宿主窗口，不能用于这里）。
+        """
+        widget = self._editor
+        while widget is not None:
+            if getattr(widget, "_pending_ttml_import", False):
+                signal = getattr(widget, "ttml_import_finished", None)
+                widget._pending_ttml_import = False
+                if signal is not None:
+                    try:
+                        signal.emit(bool(success), str(message))
+                    except Exception:
+                        pass
+                return
+            parent_getter = getattr(widget, "parentWidget", None)
+            widget = parent_getter() if callable(parent_getter) else None
+
     def _on_lyrics_parse_error(self, error_msg: str) -> None:
         """歌词解析失败的回调。"""
         if self._lyric_tooltip:
@@ -897,6 +918,7 @@ class FileLoader:
             position=InfoBarPosition.TOP, duration=5000,
             parent=self._editor,
         )
+        self._notify_ttml_import_finished(False, error_msg)
 
     def _cleanup_lyric_thread(self) -> None:
         """清理歌词解析线程。"""
@@ -921,12 +943,34 @@ class FileLoader:
         for singer in new_singers:
             self._project.add_singer(singer)
 
-        # ASS Title → project.metadata.title（仅当项目无标题或为默认时覆盖）
-        ass_title = parse_meta.get("title") if parse_meta else None
-        if ass_title and self._project.metadata is not None:
-            cur = (self._project.metadata.title or "").strip()
-            if not cur or cur in ("Untitled", "未命名"):
-                self._project.metadata.title = ass_title
+        # 文件元数据 → project.metadata。ASS 只带 Title；TTML/AMLL 额外带
+        # artist / album / language。空项目才覆盖，避免导入歌词冲掉用户已填信息。
+        if parse_meta and self._project.metadata is not None:
+            fmt = str(parse_meta.get("format") or "")
+            title = str(parse_meta.get("title") or "").strip()
+            if title:
+                cur = (self._project.metadata.title or "").strip()
+                if not cur or cur in ("Untitled", "未命名"):
+                    self._project.metadata.title = title
+            if fmt == "ttml":
+                for field_name in ("artist", "album"):
+                    value = str(parse_meta.get(field_name) or "").strip()
+                    if value and not str(
+                        getattr(self._project.metadata, field_name, "") or ""
+                    ).strip():
+                        setattr(self._project.metadata, field_name, value)
+                language = str(parse_meta.get("language") or "").strip()
+                # 只给全新/空项目写语言；已有歌词的项目保留用户语言设置，
+                # 避免宿主 import_ttml_from_text 覆盖当前项目偏好。
+                if language and not self._project.sentences:
+                    self._project.metadata.language = language
+                extra = parse_meta.get("extra")
+                if (
+                    isinstance(extra, dict)
+                    and not self._project.sentences
+                    and isinstance(self._project.metadata.extra, dict)
+                ):
+                    self._project.metadata.extra.update(extra)
 
         if new_singers and self._store:
             self._store.notify("singers")
@@ -938,6 +982,7 @@ class FileLoader:
                 position=InfoBarPosition.TOP, duration=3000,
                 parent=self._editor,
             )
+            self._notify_ttml_import_finished(False, "歌词文件未解析出有效内容")
             return
 
         self._project.sentences.clear()
@@ -961,8 +1006,23 @@ class FileLoader:
             parent=self._editor,
         )
 
+        warnings = (parse_meta or {}).get("warnings")
+        if warnings:
+            InfoBar.warning(
+                title=self._editor.tr("TTML 辅助轨已忽略"),
+                content="\n".join(str(item) for item in warnings),
+                orient=Qt.Orientation.Horizontal,
+                isClosable=True,
+                position=InfoBarPosition.TOP,
+                duration=8000,
+                parent=self._editor,
+            )
+
         # 自带注音格式弹窗；其余格式自动跑一轮保持原有注音的注音分析
         self._post_import_ruby_handling(is_nicokara, parse_meta)
+        self._notify_ttml_import_finished(
+            True, self._editor.tr("已加载 {n} 行歌词").format(n=len(sentences))
+        )
 
     def can_load_from_clipboard(self) -> bool:
         """判断是否可以从剪贴板加载歌词。
@@ -985,6 +1045,7 @@ class FileLoader:
                 position=InfoBarPosition.TOP, duration=3000,
                 parent=self._editor,
             )
+            self._notify_ttml_import_finished(False, "歌词内容为空")
             return
 
         # SUG 项目格式：JSON 解析毫秒级，且需要走 load_project 流程，保持同步
@@ -995,6 +1056,7 @@ class FileLoader:
 
         # 若已有解析正在进行，忽略本次请求
         if self._lyric_thread is not None:
+            self._notify_ttml_import_finished(False, "已有歌词解析正在进行")
             return
 
         from strange_uta_game.frontend.theme import theme
@@ -1015,6 +1077,7 @@ class FileLoader:
                     position=InfoBarPosition.TOP, duration=3000,
                     parent=self._editor,
                 )
+                self._notify_ttml_import_finished(False, "请先创建或打开一个项目")
                 return
 
         # 在主线程预读 settings
@@ -1088,6 +1151,51 @@ class FileLoader:
         self.create_fresh_project(inherit_audio=inherit_audio)
         return True
 
+    def _validate_ttml_before_replace(self, path: str) -> bool:
+        """TTML 先同步校验，避免坏文件把当前项目替换成空项目。
+
+        `load_lyrics` 的正常流程是先 `create_fresh_project` 再异步解析；
+        TTML 的 XML/根元素错误应在替换项目之前就拦截。读取/解码失败也按
+        文件错误处理，不触碰当前项目。
+        """
+        if Path(path).suffix.lower() != ".ttml":
+            return True
+        try:
+            from strange_uta_game.backend.infrastructure.parsers.encoding import (
+                decode_lyric_bytes,
+            )
+            from strange_uta_game.backend.infrastructure.parsers.ttml_parser import (
+                TTMLParser,
+            )
+
+            content, _encoding = decode_lyric_bytes(Path(path).read_bytes())
+            document = TTMLParser().parse_document(content)
+        except Exception as exc:
+            InfoBar.error(
+                title=self._editor.tr("TTML 文件无效"),
+                content=str(exc),
+                orient=Qt.Orientation.Horizontal,
+                isClosable=True,
+                position=InfoBarPosition.TOP,
+                duration=6000,
+                parent=self._editor,
+            )
+            return False
+        if not document.lines:
+            InfoBar.warning(
+                title=self._editor.tr("TTML 文件没有歌词"),
+                content=self._editor.tr(
+                    "没有解析到可导入的歌词行，当前项目保持不变。"
+                ),
+                orient=Qt.Orientation.Horizontal,
+                isClosable=True,
+                position=InfoBarPosition.TOP,
+                duration=5000,
+                parent=self._editor,
+            )
+            return False
+        return True
+
     def load_lyrics(self, path: str, check_unsaved: bool = True):
         """加载歌词文件到全新项目（等同「新建项目 + 加载歌词」，异步解析）。
 
@@ -1099,6 +1207,10 @@ class FileLoader:
         # 在途守卫：已有歌词解析正在进行时忽略本次请求（与剪贴板入口一致），
         # 避免替换项目后线程/worker 引用被覆盖、迟到结果覆盖新项目。
         if self._lyric_thread is not None:
+            return
+
+        # TTML 在替换项目之前同步校验；坏 XML 不能触发 create_fresh_project。
+        if not self._validate_ttml_before_replace(path):
             return
 
         # 准备全新项目（含未保存检测）。需要 default_singer_id，必须在启动

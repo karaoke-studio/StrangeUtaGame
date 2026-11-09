@@ -10,6 +10,7 @@ from .kasugamuki_romaji_exporter import KirakaraExporter, KasugamukiRomajiExport
 from .lrc_exporter import KRAExporter, LRCExporter, LRCLineExporter, LRCWordExporter
 from .nicokara_exporter import NicokaraExporter, NicokaraWithRubyExporter
 from .srt_exporter import SRTExporter
+from .ttml_exporter import TTMLExporter
 from .txt2ass_exporter import ASSDirectExporter, Txt2AssExporter
 from .txt_exporter import TXTExporter
 
@@ -28,6 +29,8 @@ ALL_EXPORTERS = [
     InlineExporter,
     KasugamukiExporter,
     KirakaraExporter,
+    # 新增交换格式放在末尾：既有格式的顺序/行为保持不变。
+    TTMLExporter,
 ]
 
 
@@ -103,6 +106,7 @@ __all__ = [
     "KasugamukiExporter",
     "KasugamukiRomajiExporter",
     "KirakaraExporter",
+    "TTMLExporter",
     "ALL_EXPORTERS",
     "get_exporter_by_name",
     "get_exporter_by_extension",

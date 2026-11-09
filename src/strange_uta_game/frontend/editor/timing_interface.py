@@ -1612,7 +1612,32 @@ class EditorInterface(QWidget):
                 self._paste_inline_format(inline_text)
                 return
 
-        # 内联时间戳格式优先（来自全文本编辑器的复制内容）
+        # TTML/AMLL：整批歌词，绝不能当普通字符把 XML 插进当前行。
+        # 必须早于内联时间戳检测：TTML 正文/翻译里也可能出现 [00:12.34]。
+        if text:
+            from strange_uta_game.backend.infrastructure.parsers.ttml_parser import (
+                is_ttml_content,
+            )
+
+            if is_ttml_content(text):
+                if self._file_loader.can_load_from_clipboard():
+                    self._file_loader.load_lyrics_from_text(text)
+                else:
+                    InfoBar.warning(
+                        title=self.tr("检测到 TTML 歌词"),
+                        content=self.tr(
+                            "当前项目已有歌词，不能把 TTML/XML 当普通文本插入。"
+                            "请先新建项目，或使用「加载歌词」替换。"
+                        ),
+                        orient=Qt.Orientation.Horizontal,
+                        isClosable=True,
+                        position=InfoBarPosition.TOP,
+                        duration=6000,
+                        parent=self,
+                    )
+                return
+
+        # 内联时间戳格式（来自全文本编辑器的复制内容）
         if text and self._INLINE_TS_DETECT_RE.search(text):
             self._paste_inline_format(text)
             return
