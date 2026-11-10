@@ -64,6 +64,56 @@ class TestLoadLyricsFromFile:
         # 所有 sentence 归属默认演唱者
         assert all(s.singer_id == SINGER_ID for s in sentences)
 
+    def test_ttml_file_text_and_timings(self, tmp_path: Path):
+        fixture = (
+            Path(__file__).resolve().parents[2]
+            / "fixtures"
+            / "ttml"
+            / "sug_roundtrip.ttml"
+        )
+        path = _write(tmp_path, "song.ttml", fixture.read_text(encoding="utf-8"))
+
+        sentences = ProjectImportService.load_lyrics_from_file(path, SINGER_ID)
+
+        assert len(sentences) == 5
+        assert sentences[0].text == "夢を見る"
+        assert sentences[0].characters[0].timestamps == [1000]
+        # 服务没有 Singer 列表：全部先归默认演唱者。
+        assert all(s.singer_id == SINGER_ID for s in sentences)
+
+    def test_ttml_with_inline_like_text_is_not_parsed_as_inline(self, tmp_path: Path):
+        content = (
+            '<tt xmlns="http://www.w3.org/ns/ttml"><body>'
+            '<p begin="1.000" end="2.000">[0|00:00:00] 歌词</p>'
+            "</body></tt>"
+        )
+        path = _write(tmp_path, "inline_like.ttml", content)
+
+        sentences, metadata = ProjectImportService.load_lyrics_and_meta_from_file(
+            path, SINGER_ID
+        )
+
+        assert sentences[0].text == "[0|00:00:00] 歌词"
+        assert metadata["format"] == "ttml"
+
+    def test_ttml_metadata(self, tmp_path: Path):
+        fixture = (
+            Path(__file__).resolve().parents[2]
+            / "fixtures"
+            / "ttml"
+            / "sug_roundtrip.ttml"
+        )
+        path = _write(tmp_path, "song.ttml", fixture.read_text(encoding="utf-8"))
+
+        sentences, metadata = ProjectImportService.load_lyrics_and_meta_from_file(
+            path, SINGER_ID
+        )
+
+        assert len(sentences) == 5
+        assert metadata["format"] == "ttml"
+        assert metadata["title"] == "SUG TTML Roundtrip"
+        assert metadata["artist"] == "初音ミク / 鏡音リン"
+
     def test_missing_file_raises_project_import_error(self, tmp_path: Path):
         missing = str(tmp_path / "nope.lrc")
         with pytest.raises(ProjectImportError):

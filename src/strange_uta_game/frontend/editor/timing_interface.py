@@ -1612,7 +1612,32 @@ class EditorInterface(QWidget):
                 self._paste_inline_format(inline_text)
                 return
 
-        # 内联时间戳格式优先（来自全文本编辑器的复制内容）
+        # TTML/AMLL：整批歌词，绝不能当普通字符把 XML 插进当前行。
+        # 必须早于内联时间戳检测：TTML 正文/翻译里也可能出现 [00:12.34]。
+        if text:
+            from strange_uta_game.backend.infrastructure.parsers.ttml_parser import (
+                is_ttml_content,
+            )
+
+            if is_ttml_content(text):
+                if self._file_loader.can_load_from_clipboard():
+                    self._file_loader.load_lyrics_from_text(text)
+                else:
+                    InfoBar.warning(
+                        title=self.tr("检测到 TTML 歌词"),
+                        content=self.tr(
+                            "当前项目已有歌词，不能把 TTML/XML 当普通文本插入。"
+                            "请先新建项目，或使用「加载歌词」替换。"
+                        ),
+                        orient=Qt.Orientation.Horizontal,
+                        isClosable=True,
+                        position=InfoBarPosition.TOP,
+                        duration=6000,
+                        parent=self,
+                    )
+                return
+
+        # 内联时间戳格式（来自全文本编辑器的复制内容）
         if text and self._INLINE_TS_DETECT_RE.search(text):
             self._paste_inline_format(text)
             return
@@ -6505,6 +6530,14 @@ class EditorInterface(QWidget):
             sentence = self._project.sentences[edit_line_idx]
             before_character = deepcopy(sentence.characters[edit_char_idx])
 
+            def _current_character(
+                target_line_idx: int = edit_line_idx,
+                target_char_idx: int = edit_char_idx,
+            ) -> Character:
+                return self._project.sentences[target_line_idx].characters[
+                    target_char_idx
+                ]
+
             def _toggle_link_from_popup(
                 target_line_idx: int = edit_line_idx,
                 target_char_idx: int = edit_char_idx,
@@ -6513,11 +6546,7 @@ class EditorInterface(QWidget):
                 self._toggle_word_join_single(target_line_idx, target_char_idx)
                 # The link action owns its own undo command. If ruby is saved
                 # afterwards, its undo snapshot must preserve this new state.
-                before_character = deepcopy(
-                    self._project.sentences[target_line_idx].characters[
-                        target_char_idx
-                    ]
-                )
+                before_character = deepcopy(_current_character())
 
             def _toggle_word_join_shortcut_from_popup(
                 target_line_idx: int = edit_line_idx,
@@ -6529,11 +6558,7 @@ class EditorInterface(QWidget):
                 self._toggle_word_join()
                 # The shortcut owns its undo command. A later ruby edit must
                 # preserve the resulting link state in its own snapshot.
-                before_character = deepcopy(
-                    self._project.sentences[target_line_idx].characters[
-                        target_char_idx
-                    ]
-                )
+                before_character = deepcopy(_current_character())
 
             navigation_targets = {
                 direction: target
@@ -6549,6 +6574,7 @@ class EditorInterface(QWidget):
                 sentence.characters[edit_char_idx],
                 can_link_next=edit_char_idx < len(sentence.characters) - 1,
                 parent=self,
+                character_provider=_current_character,
                 link_toggle_callback=_toggle_link_from_popup,
                 word_join_shortcut_callback=(
                     _toggle_word_join_shortcut_from_popup
@@ -6576,6 +6602,7 @@ class EditorInterface(QWidget):
             dialog.show_above(anchor)
 
             if dialog.was_modified():
+                current_character = _current_character()
                 command_manager = (
                     self._timing_service.command_manager
                     if self._timing_service
@@ -6591,11 +6618,11 @@ class EditorInterface(QWidget):
                         edit_line_idx,
                         edit_char_idx,
                         before_character,
-                        sentence.characters[edit_char_idx],
+                        current_character,
                         desc,
                     )
                     command_manager.execute(cmd)
-                last_updated_char = sentence.chars[edit_char_idx]
+                last_updated_char = current_character.char
                 # Refresh synchronously before locating the next popup: ruby
                 # width can change the rendered character rectangles.
                 self._finish_inline_ruby_edit(edit_line_idx)

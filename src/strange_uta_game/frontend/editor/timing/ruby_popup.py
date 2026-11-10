@@ -36,6 +36,7 @@ class RubyEditPopup(QDialog):
         parent=None,
         link_toggle_callback: Callable[[], None] | None = None,
         word_join_shortcut_callback: Callable[[], None] | None = None,
+        character_provider: Callable[[], Character] | None = None,
         word_join_shortcut_resolver: (
             Callable[[QKeyEvent], tuple[bool, bool, bool]] | None
         ) = None,
@@ -45,6 +46,7 @@ class RubyEditPopup(QDialog):
     ):
         super().__init__(parent)
         self._character = character
+        self._character_provider = character_provider
         self._can_link_next = can_link_next
         self._link_toggle_callback = link_toggle_callback
         self._word_join_shortcut_callback = word_join_shortcut_callback
@@ -119,10 +121,16 @@ class RubyEditPopup(QDialog):
             return ",".join(part.text for part in character.ruby.parts)
         return character.ruby.text
 
+    def _current_character(self) -> Character:
+        """Return the live project character after any structural edit."""
+        if self._character_provider is not None:
+            self._character = self._character_provider()
+        return self._character
+
     def _toggle_link(self, checked: bool) -> None:
         if self._link_toggle_callback is not None:
             self._link_toggle_callback()
-            self._linked = bool(self._character.linked_to_next)
+            self._linked = bool(self._current_character().linked_to_next)
             self._sync_link_button()
             return
         self._linked = bool(checked) and self._can_link_next
@@ -182,15 +190,16 @@ class RubyEditPopup(QDialog):
             self._link_toggle_callback is None and self._linked != self._original_linked
         )
         if ruby_changed:
-            self._character.set_ruby(
+            character = self._current_character()
+            character.set_ruby(
                 ruby_dialogs.parse_ruby_text(
                     ruby_text,
-                    self._character.check_count,
+                    character.check_count,
                     mode=split_mode,
                 )
             )
         if link_changed:
-            self._character.linked_to_next = self._linked
+            self._current_character().linked_to_next = self._linked
         self._modified = ruby_changed or link_changed or mode_changed
         self._finished = True
         super().accept()
@@ -297,7 +306,7 @@ class RubyEditPopup(QDialog):
     def _trigger_word_join_shortcut(self) -> None:
         if self._word_join_shortcut_callback is not None:
             self._word_join_shortcut_callback()
-            self._linked = bool(self._character.linked_to_next)
+            self._linked = bool(self._current_character().linked_to_next)
             self._sync_link_button()
         else:
             self._toggle_link(not self._linked)

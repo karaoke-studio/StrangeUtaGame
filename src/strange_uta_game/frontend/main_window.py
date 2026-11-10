@@ -137,6 +137,51 @@ def _build_axis_plan(project: object) -> "dict[str, object]":
     }
 
 
+def _build_ttml_meta(project: object) -> "dict[str, object]":
+    """项目元数据的纯 dict 快照（含 AMLL extra），供宿主直接消费。"""
+    meta = getattr(project, "metadata", None)
+    if meta is None:
+        return {"title": "", "artist": "", "album": "", "language": "", "extra": {}}
+    extra = getattr(meta, "extra", None)
+    try:
+        extra_snapshot = deepcopy(extra) if isinstance(extra, dict) else {}
+    except Exception:
+        extra_snapshot = {}
+    return {
+        "title": str(getattr(meta, "title", "") or ""),
+        "artist": str(getattr(meta, "artist", "") or ""),
+        "album": str(getattr(meta, "album", "") or ""),
+        "language": str(getattr(meta, "language", "") or ""),
+        "extra": extra_snapshot,
+    }
+
+
+def _export_project_ttml(project: object) -> "Optional[str]":
+    """把项目序列化为 TTML 字符串；失败/空项目返回 None。
+
+    独立成模块级函数，便于 ``export_to_next_payload`` 在宿主用
+    ``SimpleNamespace`` 模拟主窗口的契约测试中也能复用。
+    """
+    if project is None:
+        return None
+    try:
+        from strange_uta_game.backend.infrastructure.exporters.ttml_exporter import (
+            TTMLExporter,
+        )
+
+        if not getattr(project, "sentences", None):
+            return None
+        return TTMLExporter().export_to_text(project)
+    except Exception:
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "TTML 序列化失败（export_to_next_payload 将返回 None）",
+            exc_info=True,
+        )
+        return None
+
+
 class MainWindow(MSFluentWindow):
     """主窗口 - MSFluentWindow 侧边栏导航架构。
 
@@ -155,9 +200,13 @@ class MainWindow(MSFluentWindow):
     # self._embedded 实例属性写入前就访问它，会落到这个 False，保留
     # standalone 行为。
     _embedded: bool = False
+    _pending_ttml_import: bool = False
     export_to_next_requested = pyqtSignal()
     project_save_finished = pyqtSignal(str)
     project_save_failed = pyqtSignal(str)
+    # TTML 宿主导入的异步完成信号：(success, message)。
+    # 只在 import_ttml_from_text / import_ttml_from_file 受理后发出。
+    ttml_import_finished = pyqtSignal(bool, str)
 
     def __init__(self, embedded: bool = False, settings_provider=None, progress_callback=None, ai_timing_host=None):
         # 嵌入模式不经过仓库根目录的 main.py，因此在主窗口入口也安装一次。
@@ -1561,7 +1610,7 @@ class MainWindow(MSFluentWindow):
             InfoBar.warning(
                 title=self.tr("不支持的文件类型"),
                 content=self.tr(
-                    "仅支持 .sug 项目、歌词（LRC/TXT/KRA/KRL/SRT/ASS）及音频/视频文件"
+                    "仅支持 .sug 项目、歌词（LRC/TXT/KRA/KRL/SRT/ASS/TTML）及音频/视频文件"
                 ),
                 orient=Qt.Orientation.Horizontal,
                 isClosable=True,
@@ -2012,7 +2061,147 @@ class MainWindow(MSFluentWindow):
             # project.axis_groups；空 = 单轴）。.sug 落盘后宿主也可从
             # 文件读到同一份数据，这里冗余一份纯 dict 快照便于即时消费。
             "axis_plan": _build_axis_plan(project),
+            # TTML 交换快照：宿主无需理解 SUG 的 Project 对象即可把逐词
+            # 时间轴/注音交给下游渲染器。失败或空项目时为 None。
+            "ttml": _export_project_ttml(project),
+            # 纯 dict 元数据快照：含 AMLL 平台 ID/ISRC 等 extra，宿主可
+            # 直接按 ncmMusicId 等匹配音源，无需反查 SUG Project。
+            "ttml_meta": _build_ttml_meta(project),
         }
+
+    def export_ttml_text(self) -> "Optional[str]":
+        """把当前项目导出为 AMLL TTML 字符串（公开 API，不落盘）。
+
+        供 embedded 宿主把逐词时间轴交给下游渲染器/歌词站工具。空项目、
+        无歌词或序列化失败时返回 ``None``，绝不抛异常。
+        """
+        project = self._store.project if self._store is not None else None
+        return _export_project_ttml(project)
+
+    def import_ttml_from_text(
+        self,
+        content: str,
+        *,
+        switch_to_editor: bool = True,
+        force: bool = False,
+    ) -> bool:
+        """接收宿主传入的 TTML/AMLL 歌词文本（公开 API）。
+
+        与 :meth:`import_lyrics_from_text` 的宽松剪贴板入口不同，本方法先
+        同步校验 TTML 根元素/XML，再交给现有异步歌词解析器；返回 ``True``
+        表示**已受理**，真正装入完成由歌词解析 worker 的既有 UI 流程通知。
+
+        Args:
+            content: UTF-8 TTML 字符串（AMLL TTML DB 子集）。
+            switch_to_editor: 是否自动切到打轴编辑器页。
+            force: 当前项目已有未保存歌词时，是否仍强制替换。
+                默认 False：拒绝并提示，避免宿主静默覆盖用户数据。
+
+        Returns:
+            是否受理成功。注意：本方法替换当前项目的歌词行，不创建新项目；
+            宿主需要全新项目时请先自行新建/保存。
+        """
+        if not content or not str(content).strip():
+            self._show_ttml_import_error("TTML 内容为空")
+            return False
+        try:
+            from strange_uta_game.backend.infrastructure.parsers.ttml_parser import (
+                TTMLParser,
+            )
+
+            document = TTMLParser().parse_document(str(content))
+        except Exception as exc:
+            self._show_ttml_import_error(str(exc))
+            return False
+        if not document.lines:
+            self._show_ttml_import_error("TTML 中没有可导入的歌词行")
+            return False
+
+        file_loader = getattr(
+            getattr(self, "editorInterface", None), "_file_loader", None
+        )
+        if file_loader is None:
+            self._show_ttml_import_error("打轴编辑器尚未准备好")
+            return False
+        if getattr(file_loader, "_lyric_thread", None) is not None:
+            self._show_ttml_import_error("正在解析另一份歌词，请稍后再试")
+            return False
+
+        project = getattr(getattr(self, "_store", None), "project", None)
+        if (
+            not force
+            and project is not None
+            and getattr(project, "sentences", None)
+            and callable(getattr(self, "has_unsaved_changes", None))
+            and self.has_unsaved_changes()
+        ):
+            self._show_ttml_import_error(
+                "当前项目有未保存歌词。请先保存，或传 force=True 强制替换。"
+            )
+            return False
+
+        if switch_to_editor and callable(getattr(self, "switchTo", None)):
+            self.switchTo(self.editorInterface)
+        self._pending_ttml_import = True
+        try:
+            file_loader.load_lyrics_from_text(str(content))
+        except Exception as exc:
+            self._pending_ttml_import = False
+            self._show_ttml_import_error(str(exc))
+            signal = getattr(self, "ttml_import_finished", None)
+            if signal is not None:
+                try:
+                    signal.emit(False, str(exc))
+                except Exception:
+                    pass
+            return False
+        return True
+
+    def import_ttml_from_file(
+        self,
+        file_path: str,
+        *,
+        switch_to_editor: bool = True,
+        force: bool = False,
+    ) -> bool:
+        """读取宿主下载/缓存的 .ttml 文件并交给 SUG 导入。
+
+        与 :meth:`import_ttml_from_text` 同一语义/同一完成信号；文件读取或
+        解码失败时返回 ``False``，不触碰当前项目。
+        """
+        from pathlib import Path
+
+        try:
+            from strange_uta_game.backend.infrastructure.parsers.encoding import (
+                decode_lyric_bytes,
+            )
+
+            content, _encoding = decode_lyric_bytes(Path(file_path).read_bytes())
+        except Exception as exc:
+            self._show_ttml_import_error(str(exc))
+            return False
+        return MainWindow.import_ttml_from_text(
+            self,
+            content,
+            switch_to_editor=switch_to_editor,
+            force=force,
+        )
+
+    def _show_ttml_import_error(self, message: str) -> None:
+        """embedded TTML 导入失败的统一提示（不抛异常）。"""
+        try:
+            InfoBar.error(
+                title=self.tr("无法导入 TTML"),
+                content=message,
+                orient=Qt.Orientation.Horizontal,
+                isClosable=True,
+                position=InfoBarPosition.TOP,
+                duration=5000,
+                parent=self,
+            )
+        except Exception:
+            # 无 Qt/宿主自绘提示时也不阻断调用方。
+            pass
 
     def import_lyrics_from_text(self, content: str) -> bool:
         """从宿主传入的文本直接导入歌词（公开 API）。

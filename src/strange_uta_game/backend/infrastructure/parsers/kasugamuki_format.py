@@ -60,18 +60,18 @@ def _is_exported_role_tag(char: Character) -> bool:
     )
 
 
-def _escape_literal_role_tags(text: str) -> str:
-    """Escape literal top-level ``【@name】`` tokens for Kirakara.
+def _escape_krl_top_level_text(text: str) -> str:
+    """Encode literal text for Kirakara's top-level lexer.
 
-    Kirakara treats a complete token anywhere in a lyric line as role
-    metadata.  Prefixing its opening bracket with ``\\`` makes it lyric text;
-    an unclosed ``【@`` is not a token and is left alone.  Existing literal
-    backslashes immediately before the token are doubled before adding the
-    escape, preserving them under Kirakara's ``\\\\`` / ``\\【`` lexer rules.
+    Kirakara decodes ``\\\\`` as one literal backslash and ``\\【`` as one
+    literal opening bracket.  Export therefore doubles every literal
+    backslash and prefixes complete role-shaped ``【@name】`` lyric tokens with
+    one additional backslash.  An unclosed ``【@`` is not a role token and is
+    left alone.
 
-    Role-shaped text inside ``{display|ruby}`` is already protected by the KRL
-    block grammar and must not be escaped, otherwise the added backslash would
-    become visible text inside the block.
+    ``{display|ruby}`` blocks are consumed as one token before Kirakara applies
+    either escape rule.  Their contents must remain byte-for-byte unchanged;
+    otherwise an encoded backslash would become visible text inside the block.
     """
     result: List[str] = []
     pos = 0
@@ -82,18 +82,15 @@ def _escape_literal_role_tags(text: str) -> str:
             pos = block_match.end()
             continue
 
-        slash_end = pos
-        while slash_end < len(text) and text[slash_end] == "\\":
-            slash_end += 1
-        role_match = _KRL_ROLE_TOKEN_RE.match(text, slash_end)
+        role_match = _KRL_ROLE_TOKEN_RE.match(text, pos)
         if role_match is not None:
-            slash_count = slash_end - pos
-            result.append("\\" * (slash_count * 2 + 1))
+            result.append("\\")
             result.append(role_match.group(0))
             pos = role_match.end()
             continue
 
-        result.append(text[pos])
+        char = text[pos]
+        result.append("\\\\" if char == "\\" else char)
         pos += 1
     return "".join(result)
 
@@ -110,7 +107,7 @@ def _join_krl_segments(segments: List[Tuple[str, bool]]) -> str:
 
     def flush_ordinary() -> None:
         if ordinary:
-            result.append(_escape_literal_role_tags("".join(ordinary)))
+            result.append(_escape_krl_top_level_text("".join(ordinary)))
             ordinary.clear()
 
     for text, is_role_tag in segments:

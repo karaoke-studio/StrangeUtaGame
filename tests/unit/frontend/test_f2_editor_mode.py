@@ -1,5 +1,6 @@
 """Regression tests for choosing the F2 ruby editor style."""
 
+from copy import deepcopy
 from types import SimpleNamespace
 
 from strange_uta_game.backend.domain import Character, Project, Sentence
@@ -195,6 +196,95 @@ def test_configured_word_join_inside_f2_delegates_to_regular_action(monkeypatch)
     EditorInterface._on_char_edit_requested(editor, 0, 0)
 
     assert calls == ["word_join"]
+
+
+def test_f2_ruby_save_survives_structural_word_join_and_undo_redo(monkeypatch):
+    from PyQt6.QtCore import QRect
+
+    from strange_uta_game.backend.application import CommandManager
+    from strange_uta_game.backend.application.commands import SentenceSnapshotCommand
+    from strange_uta_game.backend.domain import Ruby, RubyPart
+    from strange_uta_game.frontend.editor import timing_interface as module
+
+    project = Project(sentences=[_sentence("今宵")])
+    original_character = project.sentences[0].characters[0]
+    manager = CommandManager()
+
+    def toggle_word_join_with_structural_snapshot():
+        before = deepcopy(project.sentences)
+        project.sentences[0].characters[0].linked_to_next = True
+        after = deepcopy(project.sentences)
+        manager.execute(
+            SentenceSnapshotCommand(project, before, after, "连词")
+        )
+
+    class FakePopup:
+        def __init__(
+            self,
+            character,
+            *,
+            character_provider,
+            word_join_shortcut_callback,
+            **_kwargs,
+        ):
+            self._opened_character = character
+            self._character_provider = character_provider
+            self._word_join_shortcut_callback = word_join_shortcut_callback
+
+        def show_above(self, _anchor):
+            self._word_join_shortcut_callback()
+            live_character = self._character_provider()
+            assert live_character is not self._opened_character
+            live_character.set_ruby(Ruby(parts=[RubyPart(text="こん")]))
+
+        def was_modified(self):
+            return True
+
+        def navigation_request(self):
+            return None
+
+    editor = SimpleNamespace(
+        _project=project,
+        _f2_ruby_editor_mode="compact",
+        _timing_service=SimpleNamespace(command_manager=manager),
+        preview=SimpleNamespace(
+            character_global_rect=lambda _line, _char: QRect(10, 10, 20, 20)
+        ),
+        _toggle_word_join=toggle_word_join_with_structural_snapshot,
+        _resolve_word_join_shortcut=lambda _event: (False, False, False),
+        _long_press_timer=SimpleNamespace(interval=lambda: 300),
+        _finish_inline_ruby_edit=lambda _line: None,
+        tr=lambda text: text,
+    )
+    editor._ruby_navigation_target = lambda line, char, direction: (
+        EditorInterface._ruby_navigation_target(editor, line, char, direction)
+    )
+
+    monkeypatch.setattr(module, "RubyEditPopup", FakePopup)
+    monkeypatch.setattr(module.InfoBar, "success", lambda **_kwargs: None)
+
+    EditorInterface._on_char_edit_requested(editor, 0, 0)
+
+    live_character = project.sentences[0].characters[0]
+    assert live_character is not original_character
+    assert live_character.linked_to_next is True
+    assert live_character.ruby.text == "こん"
+
+    assert manager.undo() == "编辑注音（第 1 句 第 1 字）"
+    assert project.sentences[0].characters[0].linked_to_next is True
+    assert project.sentences[0].characters[0].ruby is None
+
+    assert manager.undo() == "连词"
+    assert project.sentences[0].characters[0].linked_to_next is False
+    assert project.sentences[0].characters[0].ruby is None
+
+    assert manager.redo() == "连词"
+    assert project.sentences[0].characters[0].linked_to_next is True
+    assert project.sentences[0].characters[0].ruby is None
+
+    assert manager.redo() == "编辑注音（第 1 句 第 1 字）"
+    assert project.sentences[0].characters[0].linked_to_next is True
+    assert project.sentences[0].characters[0].ruby.text == "こん"
 
 
 def test_f2_editor_setting_is_below_ruby_shortcut(qapp):

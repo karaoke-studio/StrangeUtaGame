@@ -34,6 +34,9 @@ from strange_uta_game.backend.infrastructure.parsers.kasugamuki_format import (
     sentences_from_kasugamuki,
     strip_krl_config,
 )
+from strange_uta_game.backend.infrastructure.parsers.ttml_parser import (
+    is_ttml_content,
+)
 from strange_uta_game.backend.infrastructure.parsers.text_splitter import (
     CharType,
     get_char_type,
@@ -383,11 +386,15 @@ def detect_lyric_format(content: str) -> str:
     """检测歌词内容的格式。
 
     Returns:
-        格式名称: "sug", "utaten", "krl", "inline", "nicokara", "ass", "srt", "lrc", "text"
+        格式名称: "sug", "ttml", "utaten", "krl", "inline", "nicokara",
+        "ass", "srt", "lrc", "text"
     """
     # SUG/JSON 格式检测（最高优先级，避免误解析）
     if _is_json_content(content):
         return "sug"
+    # TTML / AMLL TTML：根元素 <tt>；必须早于纯文本与内联格式检测。
+    if is_ttml_content(content):
+        return "ttml"
     # Kirakara/KRL 文件头部的 `config { ... }` 渲染配置块不是歌词，先剥离再检测。
     content = strip_krl_config(content)
     if UtatenRubyParser.is_utaten_format(content):
@@ -521,6 +528,56 @@ def parse_lyric_content(
             new_singers,
             {"format": "krl", "prompt_ruby_choice": True},
         )
+
+    # TTML / AMLL TTML（含 ruby、逐词时间轴、ttm:agent 演唱者）
+    if fmt == "ttml":
+        if progress_cb:
+            progress_cb(QCoreApplication.translate("LyricLoader", "正在解析 TTML 格式..."))
+        from strange_uta_game.backend.infrastructure.parsers.ttml_parser import (
+            TTMLParser,
+        )
+
+        parser = TTMLParser()
+        document = parser.parse_document(content)
+
+        # agent 显示名 → Singer.id：优先复用同名演唱者，否则新建。
+        singer_name_to_id: dict = {}
+        singer_colors = [
+            "#FF6B6B", "#4ECDC4", "#45B7D1", "#FFA07A", "#98D8C8",
+            "#C9B1FF", "#F7DC6F", "#82E0AA", "#F1948A", "#85C1E9",
+        ]
+        agent_names = sorted(
+            {
+                agent.name
+                for agent in document.agents.values()
+                if agent.name
+            }
+        )
+        for idx, name in enumerate(agent_names):
+            existing_id = None
+            if project_singers:
+                for singer in project_singers:
+                    if singer.name == name:
+                        existing_id = singer.id
+                        break
+            if existing_id:
+                singer_name_to_id[name] = existing_id
+            else:
+                color = singer_colors[idx % len(singer_colors)]
+                new_singer = Singer(name=name, color=color, is_default=False)
+                singer_name_to_id[name] = new_singer.id
+                new_singers.append(new_singer)
+
+        sentences = parse_to_sentences(
+            document.lines,
+            default_singer_id,
+            singer_name_to_id=singer_name_to_id,
+        )
+        meta = parser.parse_metadata()
+        meta["format"] = "ttml"
+        if document.warnings:
+            meta["warnings"] = list(document.warnings)
+        return _apply_compensation(sentences), False, new_singers, meta
 
     # 带内联时间戳的注音文本格式（|| 分隔符）
     if fmt == "annotated":

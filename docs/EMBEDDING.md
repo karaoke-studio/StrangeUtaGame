@@ -54,7 +54,11 @@ class MainWindow(MSFluentWindow):
 | `trigger_save() -> bool` | 宿主把自己顶层的 Ctrl+S 转发到这里；返回是否成功发起异步保存 |
 | `has_unsaved_changes() -> bool` | 宿主 closeEvent 用，判断是否有脏数据 |
 | `flush_unsaved()` | 宿主销毁 widget 前调用，把脏数据兜底写到崩溃恢复临时文件 |
-| `export_to_next_payload() -> dict \| None` | 获取项目、角色、Nicokara 标签和媒体路径的隔离快照，供宿主送往下一模块；含 `axis_plan` 分色分轴计划（§2.1） |
+| `export_to_next_payload() -> dict \| None` | 获取项目、角色、Nicokara 标签和媒体路径的隔离快照，供宿主送往下一模块；含 `axis_plan` 分色分轴计划（§2.1）与 `ttml` 字符串快照（§2.2） |
+| `import_ttml_from_text(content, switch_to_editor=True, force=False) -> bool` | 接收宿主传入的 AMLL TTML 文本；同步校验后交给既有异步歌词导入（§2.2） |
+| `import_ttml_from_file(file_path, switch_to_editor=True, force=False) -> bool` | 读取宿主下载/缓存的 `.ttml` 文件并走同一导入流程（§2.2） |
+| `ttml_import_finished(success: bool, message: str)` | 已受理的 TTML 异步导入完成/失败信号（§2.2） |
+| `export_ttml_text() -> str \| None` | 不落盘返回当前项目的 AMLL TTML 字符串；空项目/失败返回 `None`（§2.2） |
 | `on_host_visibility_changed(visible: bool)` | 宿主切入/切出整个 SUG 控件时调用；切出时只要音频仍在播放就立即暂停（不受“离开打轴界面时暂停”设置约束），并从音频实际状态同步快捷键模式；同时转发给前后台节流器——宿主隐藏 SUG 区域而宿主窗口仍可见时，只有这条显式通知能让非音频服务（UI 轮询/主题轮询等）降频 |
 
 embedded 实例还公开 `export_to_next_requested` 信号。SUG 的导出页仅在
@@ -122,6 +126,58 @@ standalone「导出」按组拆分（embedded 宿主不经过此路径，仅供�
 
 分组随 `.sug` 持久化（`axis_groups` 键，仅非空时写入；旧文件缺省 = 单
 轴）。宿主从磁盘加载 `.sug` 时可读到同一份数据，与 payload 快照同源。
+
+### 2.2 TTML 交接接口（AMLL TTML 前置）
+
+宿主与 SUG 之间可以用 TTML 作为**不依赖 SUG Project 对象**的歌词交换快照。
+当前实现覆盖 AMLL TTML DB 的核心子集：逐词 `<span begin/end>`、TTML2 ruby、
+`ttm:agent` 演唱者、`amll:meta` 曲名/艺人/专辑、根元素 `xml:lang` 语言，
+以及 SUG 自己追加的
+`x-sug-checkpoint` / `x-sug-release` / `x-sug-link` / `x-sug-no-cp` /
+`x-sug-untimed` / `x-sug-empty` role（第三方可忽略）。
+
+| 方向 | 接口 | 说明 |
+|---|---|---|
+| 宿主 → SUG | `import_ttml_from_text(...)` / `import_ttml_from_file(...)` | 先同步校验 XML/根元素/歌词行，再调用既有歌词解析 worker。返回 `True` 仅表示**已受理**；异步完成/失败通过 `ttml_import_finished(bool, message)` 发出。`switch_to_editor=False` 时宿主可留在自己的页面。**语义**：替换当前项目的歌词行，不创建新项目；当前项目有未保存歌词时默认拒绝并返回 `False`，宿主确认丢弃后传 `force=True`。 |
+| SUG → 宿主 | `export_ttml_text() -> str \| None` | 纯内存序列化，不写文件、不改项目。空项目、无歌词或异常时返回 `None`。 |
+| 元数据 | `ProjectMetadata.extra` | AMLL 平台 ID（ncmMusicId / qqMusicId / spotifyId / appleMusicId）、ISRC、ttmlAuthor 等原样保留，随 `.sug` 持久化并随 `export_to_next_payload()` 的 `project` 快照交给宿主；导出 TTML 时回写为 `amll:meta`。 |
+| 「进入下一步」 | `export_to_next_payload()["ttml"]` / `["ttml_meta"]` | `ttml` 为字符串快照；`ttml_meta` 为纯 dict（title/artist/album/language/extra）。与 `axis_plan` 并列的加法键；既有键（`project` / `nicokara_tags` / `source_path` / `media_path` / `media_kind` / `audio_path` / `axis_plan`）保持不变。 |
+
+典型嵌入顺序：
+
+```python
+sug = MainWindow.for_embedding(parent, settings_provider=provider)
+
+# 歌词站/宿主文件检索 → SUG 打轴
+sug.ttml_import_finished.connect(on_ttml_import_finished)
+
+if ttml_from_db:
+    # 文本或宿主已下载到本地的文件均可；默认保护未保存歌词
+    sug.import_ttml_from_text(ttml_from_db)
+    # 或：sug.import_ttml_from_file(cached_ttml_path)
+
+# 用户完成打轴 → 下游渲染
+sug.export_to_next_requested.connect(on_next)
+payload = sug.export_to_next_payload()
+ttml = payload["ttml"]
+if ttml:
+    renderer.load_ttml(ttml)  # 也可单独调用 sug.export_ttml_text()
+```
+
+**边界**：
+
+- `x-bg` 背景人声、`x-translation` 翻译、`x-roman` 音译暂不进入 SUG 主文本；
+  导入时忽略并记录 warning，避免把辅助轨静默混进主唱歌词。
+- TTML 的字体/颜色/图片与 songPart 分区不进入 SUG 数据模型，导出时不会
+  保留；平台 ID / ISRC / 作者等元数据进入 `ProjectMetadata.extra` 并保留。
+- `import_ttml_from_text()` / `import_ttml_from_file()` 的 `True` 只表示
+  **已受理**；异步结果以 `ttml_import_finished(success, message)` 为准。
+  同步校验失败直接返回 `False`，不发信号。
+- `ttml` 键是**加法**，旧宿主即使不读取也不影响既有流程；新宿主必须容忍
+  它是 `None`（空项目/序列化失败）。
+- 接口稳定性的破坏性变更仍按 §9 处理：先改本文档，再跑
+  `tests/unit/test_embedded_contract.py` 与
+  `tests/unit/test_ttml_embedded_handoff.py`。
 
 异步保存完成后发出 `project_save_finished(str)`，失败时发出
 `project_save_failed(str)`。宿主需要“保存后继续”的流程时，应等待对应信号，

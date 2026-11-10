@@ -52,6 +52,9 @@ from strange_uta_game.backend.infrastructure.parsers.kasugamuki_format import (
     is_kasugamuki_content,
     sentences_from_kasugamuki,
 )
+from strange_uta_game.backend.infrastructure.parsers.ttml_parser import (
+    is_ttml_content,
+)
 
 
 def _reset_nicokara_tags() -> None:
@@ -81,7 +84,7 @@ class HomeInterface(QWidget):
     project_created = pyqtSignal(Project, str)  # (project, audio_path)
     project_opened = pyqtSignal(Project, str, object)  # (project, file_path, extras)
     project_save_requested = pyqtSignal()  # 请求保存当前项目
-    _LYRIC_EXTENSIONS = {".lrc", ".txt", ".kra", ".krl", ".ass", ".srt"}
+    _LYRIC_EXTENSIONS = {".lrc", ".txt", ".kra", ".krl", ".ass", ".srt", ".ttml"}
     _PROJECT_EXTENSIONS = {".sug"}
     _AUDIO_EXTENSIONS = {
         ".mp3", ".wav", ".flac", ".ogg",
@@ -98,6 +101,8 @@ class HomeInterface(QWidget):
         self._lyric_lines: List[Sentence] = []
         self._nicokara_singers: List[Singer] = []
         self._nicokara_singer_key_to_id: dict = {}
+        self._ttml_singers: List[Singer] = []
+        self._ttml_meta: dict = {}
         # 异步加载相关
         self._loading_thread: Optional[QThread] = None
         self._loading_worker = None
@@ -382,7 +387,7 @@ class HomeInterface(QWidget):
             self,
             self.tr("选择歌词文件"),
             init_dir,
-            self.tr("歌词文件 (*.lrc *.txt *.kra *.krl *.ass *.srt);;所有文件 (*.*)"),
+            self.tr("歌词文件 (*.lrc *.txt *.kra *.krl *.ass *.srt *.ttml);;所有文件 (*.*)"),
         )
 
         if file_path:
@@ -439,60 +444,36 @@ class HomeInterface(QWidget):
 
             # 解析文本框中的原始内容
             self._parse_text_content(text)
+            if not self._lyric_lines and self._detect_format(text) == "ttml":
+                InfoBar.warning(
+                    title=self.tr("TTML 没有歌词"),
+                    content=self.tr("没有解析到可导入的歌词行，未创建项目。"),
+                    orient=Qt.Orientation.Horizontal,
+                    isClosable=True,
+                    position=InfoBarPosition.TOP,
+                    duration=5000,
+                    parent=self,
+                )
+                return
 
             # 创建空项目
             project = self._project_service.create_project()
             default_singer = project.get_default_singer()
 
-            # 如果有 Nicokara 导入的演唱者，添加到项目中
-            if self._nicokara_singers:
-                # 建立临时 singer_id → 项目 singer_id 的映射
-                nicokara_id_map: dict = {}
-                for nico_singer in self._nicokara_singers:
-                    # 检查是否已有同名演唱者
-                    existing = None
-                    for s in project.singers:
-                        if s.name == nico_singer.name:
-                            existing = s
-                            break
-                    if existing:
-                        nicokara_id_map[nico_singer.id] = existing.id
-                    else:
-                        new_singer = Singer(
-                            name=nico_singer.name,
-                            color=nico_singer.color,
-                            is_default=False,
-                        )
-                        project.add_singer(new_singer)
-                        nicokara_id_map[nico_singer.id] = new_singer.id
-
-                # 更新歌词行中的 singer_id 映射
-                for line in self._lyric_lines:
-                    # 映射行级 singer_id
-                    if line.singer_id in nicokara_id_map:
-                        line.singer_id = nicokara_id_map[line.singer_id]
-                    else:
-                        line.singer_id = default_singer.id
-                    # 映射 per-char singer_id
-                    for char in line.characters:
-                        if char.singer_id in nicokara_id_map:
-                            char.singer_id = nicokara_id_map[char.singer_id]
-                        else:
-                            char.singer_id = default_singer.id
-                        if char.ruby:
-                            char.ruby.singer_id = char.singer_id
+            # Nicokara / TTML 等带演唱者的导入：把临时 singer 映射到项目 singer。
+            imported_singers = list(self._nicokara_singers) + list(self._ttml_singers)
+            self._apply_imported_singers(
+                project,
+                self._lyric_lines,
+                imported_singers,
+                default_singer,
+                reuse_placeholder=bool(self._ttml_singers)
+                and not self._nicokara_singers,
+            )
 
             if self._lyric_lines:
                 # 使用已导入的歌词行（可能包含注音、时间标签等富数据）
                 for line in self._lyric_lines:
-                    if not self._nicokara_singers:
-                        # 非 Nicokara 导入：将演唱者 ID 替换为项目的默认演唱者
-                        line.singer_id = default_singer.id
-                        # 更新每个字符的 singer_id（含注音）
-                        for char in line.characters:
-                            char.singer_id = default_singer.id
-                            if char.ruby:
-                                char.ruby.singer_id = default_singer.id
                     project.add_sentence(line)
             else:
                 # 从文本框手动输入的纯文本
@@ -501,6 +482,25 @@ class HomeInterface(QWidget):
                     if line_text:
                         sentence = Sentence.from_text(line_text, default_singer.id)
                         project.add_sentence(sentence)
+
+            # TTML/AMLL 元数据写回（仅填空字段，不覆盖用户已有信息）。
+            self._apply_ttml_metadata(
+                project,
+                self._ttml_meta,
+                set_language=True,
+                set_extra=True,
+            )
+            warnings = self._ttml_meta.get("warnings")
+            if warnings:
+                InfoBar.warning(
+                    title=self.tr("TTML 辅助轨已忽略"),
+                    content="\n".join(str(item) for item in warnings),
+                    orient=Qt.Orientation.Horizontal,
+                    isClosable=True,
+                    position=InfoBarPosition.TOP,
+                    duration=8000,
+                    parent=self,
+                )
 
             # 自动分析注音并生成节奏点（仅对无注音的行）
             try:
@@ -673,6 +673,8 @@ class HomeInterface(QWidget):
                 self._lyric_lines = []
                 self._nicokara_singers = []
                 self._nicokara_singer_key_to_id = {}
+                self._ttml_singers = []
+                self._ttml_meta = {}
 
             self._set_lyrics_text(raw_content, append=append)
 
@@ -723,9 +725,14 @@ class HomeInterface(QWidget):
     def _detect_format(self, content: str) -> str:
         """从文本内容自动检测歌词格式
 
-        返回格式标识: 'krl', 'inline', 'nicokara', 'ass', 'srt', 'lrc', 'text'
+        返回格式标识: 'ttml', 'krl', 'inline', 'nicokara', 'ass', 'srt',
+        'lrc', 'text'
         """
         import re
+
+        # TTML / AMLL TTML：根元素 <tt>。
+        if is_ttml_content(content):
+            return "ttml"
 
         # KRL 也使用 {text|ruby}，必须在通用 inline 之前检测。
         if is_kasugamuki_content(content):
@@ -758,12 +765,108 @@ class HomeInterface(QWidget):
         # 纯文本
         return "text"
 
+    @staticmethod
+    def _apply_imported_singers(
+        project: Project,
+        lines: List[Sentence],
+        imported_singers: List[Singer],
+        default_singer: Singer,
+        *,
+        reuse_placeholder: bool = False,
+    ) -> dict:
+        """把导入格式的临时 Singer 映射到项目 Singer（Nicokara/TTML 共用）。
+
+        reuse_placeholder 只给 TTML 用：新项目默认的「未命名」占位歌手直接
+        复用为第一个导入歌手，避免 ghost singer。Nicokara 保持旧行为
+        （保留占位歌手 + 新增导入歌手），以免改变既有导入结果。
+        """
+        singer_map: dict = {}
+        pending_singers = list(imported_singers)
+        if (
+            reuse_placeholder
+            and pending_singers
+            and getattr(default_singer, "is_placeholder", False)
+            and not any(
+                s.name == pending_singers[0].name for s in project.singers
+            )
+        ):
+            first = pending_singers.pop(0)
+            default_singer.rename(first.name)
+            default_singer.change_color(first.color)
+            singer_map[first.id] = default_singer.id
+
+        for imported in pending_singers:
+            existing = next(
+                (s for s in project.singers if s.name == imported.name), None
+            )
+            if existing is not None:
+                singer_map[imported.id] = existing.id
+            else:
+                singer = Singer(
+                    name=imported.name,
+                    color=imported.color,
+                    is_default=False,
+                )
+                project.add_singer(singer)
+                singer_map[imported.id] = singer.id
+
+        if not lines:
+            return singer_map
+        if not singer_map:
+            for line in lines:
+                line.singer_id = default_singer.id
+                for char in line.characters:
+                    char.singer_id = default_singer.id
+                    if char.ruby:
+                        char.ruby.singer_id = default_singer.id
+            return singer_map
+
+        for line in lines:
+            line.singer_id = singer_map.get(line.singer_id, default_singer.id)
+            for char in line.characters:
+                char.singer_id = singer_map.get(
+                    char.singer_id, default_singer.id
+                )
+                if char.ruby:
+                    char.ruby.singer_id = char.singer_id
+        return singer_map
+
+    @staticmethod
+    def _apply_ttml_metadata(
+        project: Project,
+        meta: dict,
+        *,
+        set_language: bool = False,
+        set_extra: bool = False,
+    ) -> None:
+        """把 TTML 的 title/artist/album/language 写回空项目元数据。"""
+        if not meta or project.metadata is None:
+            return
+        metadata = project.metadata
+        for field_name in ("title", "artist", "album"):
+            value = str(meta.get(field_name) or "").strip()
+            if not value:
+                continue
+            current = str(getattr(metadata, field_name, "") or "").strip()
+            if not current or (field_name == "title" and current in ("Untitled", "未命名")):
+                setattr(metadata, field_name, value)
+        language = str(meta.get("language") or "").strip()
+        if language and set_language:
+            metadata.language = language
+        extra = meta.get("extra")
+        if set_extra and isinstance(extra, dict) and isinstance(metadata.extra, dict):
+            metadata.extra.update(extra)
+
     def _parse_text_content(self, content: str) -> None:
         """根据检测到的格式解析文本内容，设置 _lyric_lines 等实例变量
 
         在创建项目时调用，将文本框中的原始内容解析为 Sentence 对象。
         """
         fmt = self._detect_format(content)
+        self._nicokara_singers = []
+        self._nicokara_singer_key_to_id = {}
+        self._ttml_singers = []
+        self._ttml_meta = {}
         temp_singer = Singer(name="临时", is_default=True)
 
         if fmt == "krl":
@@ -776,6 +879,36 @@ class HomeInterface(QWidget):
 
         if fmt == "nicokara":
             self._lyric_lines = self._parse_nicokara_content(content)
+            return
+
+        if fmt == "ttml":
+            from strange_uta_game.backend.infrastructure.parsers.ttml_parser import (
+                TTMLParser,
+            )
+
+            parser = TTMLParser()
+            document = parser.parse_document(content)
+            singer_name_to_id: dict = {}
+            colors = [
+                "#FF6B6B", "#4ECDC4", "#45B7D1", "#FFA07A", "#98D8C8",
+                "#C9B1FF", "#F7DC6F", "#82E0AA", "#F1948A", "#85C1E9",
+            ]
+            for idx, name in enumerate(
+                sorted({a.name for a in document.agents.values() if a.name})
+            ):
+                singer = Singer(
+                    name=name, color=colors[idx % len(colors)], is_default=False
+                )
+                self._ttml_singers.append(singer)
+                singer_name_to_id[name] = singer.id
+            self._lyric_lines = parse_to_sentences(
+                document.lines,
+                temp_singer.id,
+                singer_name_to_id=singer_name_to_id,
+            )
+            self._ttml_meta = parser.parse_metadata()
+            if document.warnings:
+                self._ttml_meta["warnings"] = list(document.warnings)
             return
 
         if fmt == "ass":
@@ -1047,6 +1180,8 @@ class HomeInterface(QWidget):
         self._lyric_lines = []
         self._nicokara_singers = []
         self._nicokara_singer_key_to_id = {}
+        self._ttml_singers = []
+        self._ttml_meta = {}
 
     @staticmethod
     def _build_korean_sub_analyzer(auto_check_flags: dict):

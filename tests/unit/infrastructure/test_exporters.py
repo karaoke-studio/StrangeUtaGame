@@ -1559,6 +1559,84 @@ class TestNicokaraWithRubyExporter:
         finally:
             os.unlink(temp_path)
 
+    def test_export_ruby_intra_line_overlap_closes_at_own_release(self):
+        """同一行内「主歌词 + 括号合唱」重叠时，主歌词 ruby 段不得被合唱
+        的起始 ts 压成零长度。
+
+        回归样例（main.sug）：
+          {全||[03:47.62]ぜん}{力||[03:48.07]りょ|[03:48.28]く}！[>03:48.58]
+          (Oh Fu-Fu！)
+        括号里 `O` 的起始 ts 03:47.60 早于「力」的 03:48.07。旧逻辑按文本
+        顺序先找到 `O` 的 ts，再被「倒挂钳制」抬成 pos1，导出
+          @RubyN=力,...,[03:48:07],[03:48:07]
+        作用域为空。正确行为是跳过早于本段已唱位置的重叠层事件，用本行
+        `！` 的释放 ts 03:48.58 闭段。
+        """
+        from strange_uta_game.backend.domain import RubyPart
+        from strange_uta_game.backend.infrastructure.exporters import (
+            NicokaraWithRubyExporter,
+        )
+
+        project = Project()
+        singer = project.singers[0]
+
+        sentence = Sentence.from_text("全力！(Oh Fu-Fu！)", singer.id)
+        chars = sentence.characters
+
+        # 主歌词：全 / 力
+        c_zen = chars[0]
+        c_zen.set_ruby(Ruby(parts=[RubyPart(text="ぜん")]))
+        c_zen.add_timestamp(227620)  # 03:47.62
+
+        c_riki = chars[1]
+        c_riki.check_count = 2
+        c_riki.set_ruby(
+            Ruby(parts=[RubyPart(text="りょ"), RubyPart(text="く")])
+        )
+        c_riki.add_timestamp(228070, checkpoint_idx=0)  # 03:48.07
+        c_riki.add_timestamp(228280, checkpoint_idx=1)  # 03:48.28
+
+        # 主歌词行尾「！」：只有释放 ts，没有起始 ts
+        c_hat = chars[2]
+        c_hat.is_sentence_end = True
+        c_hat.set_sentence_end_ts(228580)  # 03:48.58
+
+        # 括号合唱：`O` 比「力」更早开始（重叠层），`F` 落在「力」之后
+        c_o = chars[4]
+        c_o.linked_to_next = True
+        c_o.add_timestamp(227600)  # 03:47.60 —— 早于 pos1
+        chars[7].add_timestamp(228100)  # 03:48.10
+        chars[10].add_timestamp(228280)  # 03:48.28
+
+        project.add_sentence(sentence)
+
+        exporter = NicokaraWithRubyExporter()
+
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".lrc", delete=False, encoding="utf-8"
+        ) as f:
+            temp_path = f.name
+
+        try:
+            exporter.export(project, temp_path, tag_data={})
+
+            with open(temp_path, "r", encoding="utf-8") as f:
+                content = f.read()
+
+            # 正确：pos1=03:48.07，pos2=主歌词「！」释放 03:48.58
+            assert re.search(
+                r"@Ruby\d+=力,りょ\[00:00:21\]く,"
+                r"\[03:48:07\],\[03:48:58\]",
+                content,
+            ), f"「力」ruby 段未用本行释放 ts 闭段:\n{content}"
+            # 反断言：不得再出现 pos1 == pos2 的零长度作用域
+            assert not re.search(
+                r"@Ruby\d+=力,[^,]*,\[03:48:07\],\[03:48:07\]",
+                content,
+            ), f"「力」ruby 段仍被重叠合唱压成零长度:\n{content}"
+        finally:
+            os.unlink(temp_path)
+
 
 class TestExporterUtils:
     """测试导出器工具函数"""

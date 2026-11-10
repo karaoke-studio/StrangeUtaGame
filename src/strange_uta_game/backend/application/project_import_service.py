@@ -43,7 +43,7 @@ class ProjectImportService:
         4. 统一经 :func:`parse_to_sentences` 组装为 :class:`Sentence` 列表。
 
         Args:
-            path: 歌词文件路径（.lrc/.ass/.srt/.txt/.kra 等，内部 parser 工厂识别）。
+            path: 歌词文件路径（.lrc/.ass/.srt/.txt/.kra/.ttml 等，内部 parser 工厂识别）。
             default_singer_id: 新 Sentence 默认归属的演唱者 ID。
 
         Returns:
@@ -77,8 +77,27 @@ class ProjectImportService:
             raise ProjectImportError(f"无法解码歌词文件: {e}") from e
 
         try:
-            if Path(path).suffix.lower() == ".krl":
+            suffix = Path(path).suffix.lower()
+            if suffix == ".krl":
                 return sentences_from_kasugamuki(content, default_singer_id)
+            if suffix == ".ttml":
+                # 该服务没有 Singer 列表，无法新建演唱者；所有 agent 先统一
+                # 落到 default_singer_id。需要保留多演唱者时用 TTMLParser + 前端导入。
+                from strange_uta_game.backend.infrastructure.parsers.ttml_parser import (
+                    TTMLParser,
+                )
+
+                document = TTMLParser().parse_document(content)
+                name_to_id = {
+                    agent.name: default_singer_id
+                    for agent in document.agents.values()
+                    if agent.name
+                }
+                return parse_to_sentences(
+                    document.lines,
+                    default_singer_id,
+                    singer_name_to_id=name_to_id,
+                )
             if _INLINE_PATTERN.search(content):
                 return sentences_from_inline_text(content, default_singer_id)
 
@@ -94,7 +113,7 @@ class ProjectImportService:
     @staticmethod
     def load_lyrics_and_meta_from_file(
         path: str, default_singer_id: str
-    ) -> Tuple[List[Sentence], Dict[str, str]]:
+    ) -> Tuple[List[Sentence], Dict[str, object]]:
         """从文件加载歌词及元数据。
 
         在 :meth:`load_lyrics_from_file` 的基础上额外返回 metadata 字典。
@@ -134,18 +153,36 @@ class ProjectImportService:
         except UnicodeDecodeError as e:
             raise ProjectImportError(f"无法解码歌词文件: {e}") from e
 
-        meta: Dict[str, str] = {}
+        meta: Dict[str, object] = {}
 
         try:
             if Path(path).suffix.lower() == ".krl":
                 return sentences_from_kasugamuki(content, default_singer_id), {
                     "format": "krl",
                 }
-            if _INLINE_PATTERN.search(content):
+            suffix = Path(path).suffix.lower()
+            if _INLINE_PATTERN.search(content) and suffix != ".ttml":
                 sentences = sentences_from_inline_text(content, default_singer_id)
                 return sentences, meta
 
-            suffix = Path(path).suffix.lower()
+            if suffix == ".ttml":
+                from strange_uta_game.backend.infrastructure.parsers.ttml_parser import (
+                    TTMLParser,
+                )
+
+                parser = TTMLParser()
+                document = parser.parse_document(content)
+                name_to_id = {
+                    agent.name: default_singer_id
+                    for agent in document.agents.values()
+                    if agent.name
+                }
+                sentences = parse_to_sentences(
+                    document.lines,
+                    default_singer_id,
+                    singer_name_to_id=name_to_id,
+                )
+                return sentences, parser.parse_metadata()
             if suffix == ".ass":
                 # ASS 走显式分支以拿到 metadata（Title / Generator 等）
                 parser = ASSParser()
