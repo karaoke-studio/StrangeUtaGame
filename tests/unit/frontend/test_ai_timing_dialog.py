@@ -4,6 +4,7 @@
 ETA 估算与取消二次确认文案；不启动真实后台任务。
 """
 
+import json
 from pathlib import Path
 
 import pytest
@@ -29,10 +30,13 @@ from strange_uta_game.backend.domain import (
 class _FakeService:
     """跳过真实 snapshot 的假 AiTimingService。"""
 
-    def __init__(self, snapshot):
+    def __init__(self, snapshot, *, uses_local_model=False, local_model_path=None):
         self._snapshot = snapshot
         self.executed = False
         self.retargeted = []
+        # 自定义模型接线用（production service 的两个只读属性）
+        self.uses_local_model = uses_local_model
+        self.local_model_path = local_model_path
 
     def snapshot(self, project, audio_path, *, probe_runtime=True):
         return self._snapshot
@@ -78,7 +82,17 @@ def _ready_snapshot():
     )
 
 
-def _make_dialog(qapp, tmp_path, snapshot, applied_calls):
+def _make_dialog(
+    qapp,
+    tmp_path,
+    snapshot,
+    applied_calls,
+    *,
+    settings=None,
+    service=None,
+    registry=None,
+    runtime=None,
+):
     from strange_uta_game.backend.application.ai_timing.models import (
         ModelDownloadService,
     )
@@ -87,15 +101,15 @@ def _make_dialog(qapp, tmp_path, snapshot, applied_calls):
     )
     from strange_uta_game.frontend.editor.ai_timing_dialog import AiTimingDialog
 
-    registry = ModelRegistry(tmp_path / "models")
-    service = _FakeService(snapshot)
+    registry = registry or ModelRegistry(tmp_path / "models")
+    service = service or _FakeService(snapshot)
     dialog = AiTimingDialog(
         project=_project(),
         audio_path=str(tmp_path / "song.flac"),
         service=service,
-        settings=AiTimingSettings(),
+        settings=settings or AiTimingSettings(),
         registry=registry,
-        runtime=AiRuntimeManager(),
+        runtime=runtime or AiRuntimeManager(),
         download_service=ModelDownloadService(registry, _NullTransport()),
         on_applied=applied_calls.append,
         parent=None,
@@ -148,6 +162,277 @@ class TestModelComboDeferredApply:
         # busy 期间早退：不排队、不持久化、快照不变
         assert dialog._model_apply_pending is False
         assert dialog._snapshot is snap
+
+
+def _make_local_model(root: Path, name: str = "my-model") -> Path:
+    """最小本地模型目录（UI 扫描只看 config.json，不做完整校验）。"""
+    directory = root / name
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "config.json").write_text(
+        '{"model_type": "wav2vec2", "architectures": ["Wav2Vec2ForCTC"]}',
+        encoding="utf-8",
+    )
+    return directory
+
+
+def _make_valid_local_model(root: Path, name: str = "my-model") -> Path:
+    """能通过 validate_local_model_dir 的模型目录（真实 service 用）。"""
+    directory = _make_local_model(root, name)
+    (directory / "model.safetensors").write_bytes(b"\0" * (1024 * 1024 + 1))
+    (directory / "vocab.json").write_text(
+        json.dumps({chr(code): index for index, code in enumerate(range(97, 123))}),
+        encoding="utf-8",
+    )
+    return directory
+
+
+class _StubRuntime:
+    """不探测真实解释器的 Runtime 管理器替身。"""
+
+    def probe(self, python_exe=""):
+        return RuntimeStatus(
+            available=True,
+            torch_version="test",
+            transformers_version="test",
+        )
+
+    def log_line(self, line: str) -> None:
+        pass
+
+
+class TestCustomModelSelection:
+    """自定义模型：设置回显、模型目录扫描、选择持久化与下载按钮分支。"""
+
+    def _dialog(self, qapp, tmp_path, settings, service=None):
+        return _make_dialog(
+            qapp,
+            tmp_path,
+            _ready_snapshot(),
+            [],
+            settings=settings,
+            service=service,
+        )
+
+    def test_restores_custom_model_from_settings(self, qapp, tmp_path):
+        """打开弹窗即回显自定义模型（此前永远显示第一项）。"""
+        root = tmp_path / "ai_models"
+        model = _make_local_model(root)
+        settings = AiTimingSettings(
+            model_root=str(root), wav2vec2_model_id=str(model)
+        )
+        dialog, _ = self._dialog(qapp, tmp_path, settings)
+        assert dialog.combo_model.currentIndex() == 2
+        assert not dialog.custom_model_panel.isHidden()
+        assert dialog.edit_custom_model.text() == str(model)
+        assert dialog.combo_local_models.currentData() == str(model)
+
+    def test_scan_lists_models_dropped_into_model_dir(self, qapp, tmp_path):
+        root = tmp_path / "ai_models"
+        _make_local_model(root, "my-model")
+        settings = AiTimingSettings(
+            model_root=str(root), wav2vec2_model_id=str(root / "my-model")
+        )
+        dialog, _ = self._dialog(qapp, tmp_path, settings)
+        labels = [
+            dialog.combo_local_models.itemText(index)
+            for index in range(dialog.combo_local_models.count())
+        ]
+        assert "my-model" in labels
+
+    def test_picking_local_model_persists_path(self, qapp, tmp_path):
+        root = tmp_path / "ai_models"
+        _make_local_model(root)
+        settings = AiTimingSettings(model_root=str(root))
+        dialog, _ = self._dialog(qapp, tmp_path, settings)
+        dialog.combo_model.setCurrentIndex(2)
+        for _ in range(20):
+            qapp.processEvents()
+        index = dialog.combo_local_models.findText("my-model")
+        assert index > 0
+        dialog.combo_local_models.setCurrentIndex(index)
+        assert settings.provider == "wav2vec2"
+        # 模型根内收相对路径：便携包移动/宿主换根后仍可解析
+        assert settings.wav2vec2_model_id == "my-model"
+        assert dialog._custom_model_reference() == "my-model"
+        TestPathChangeAppliesImmediately._wait_initial_refresh(qapp, dialog)
+
+    def test_switching_to_default_clears_custom_id(self, qapp, tmp_path):
+        """切回默认模型必须清空自定义 id，否则界面显示默认而实际跑自定义。"""
+        root = tmp_path / "ai_models"
+        model = _make_local_model(root)
+        settings = AiTimingSettings(
+            model_root=str(root), wav2vec2_model_id=str(model)
+        )
+        dialog, _ = self._dialog(qapp, tmp_path, settings)
+        dialog.combo_model.setCurrentIndex(0)
+        for _ in range(20):
+            qapp.processEvents()
+        TestPathChangeAppliesImmediately._wait_initial_refresh(qapp, dialog)
+        assert settings.wav2vec2_model_id == ""
+        assert settings.provider == "wav2vec2"
+        assert dialog.custom_model_panel.isHidden()
+
+    def test_local_model_hides_download_keeps_recheck(self, qapp, tmp_path):
+        from strange_uta_game.backend.application.ai_timing.models import (
+            ModelStatus,
+        )
+
+        root = tmp_path / "ai_models"
+        model = _make_local_model(root)
+        settings = AiTimingSettings(
+            model_root=str(root), wav2vec2_model_id=str(model)
+        )
+        service = _FakeService(
+            _ready_snapshot(),
+            uses_local_model=True,
+            local_model_path=model,
+        )
+        dialog, _ = self._dialog(qapp, tmp_path, settings, service=service)
+        snap = dialog._snapshot
+        snap.model = ModelStatus(state="ok", model_dir=model)
+        dialog._on_snapshot_ready(snap)
+        assert dialog.btn_download_model.isHidden()
+        assert not dialog.btn_recheck.isHidden()
+        assert "本地模型" in dialog.row_model._state_label.text()
+
+    def test_empty_custom_model_blocks_run(self, qapp, tmp_path):
+        """选自定义但没填任何内容：不能静默跑默认模型。"""
+        settings = AiTimingSettings(model_root=str(tmp_path / "ai_models"))
+        dialog, _ = self._dialog(qapp, tmp_path, settings)
+        dialog.combo_model.setCurrentIndex(2)
+        for _ in range(20):
+            qapp.processEvents()
+        TestPathChangeAppliesImmediately._wait_initial_refresh(qapp, dialog)
+        snap = dialog._snapshot
+        snap.model = None
+        dialog._on_snapshot_ready(snap)
+        assert not dialog.btn_run.isEnabled()
+        assert "自定义模型未选择" in dialog.blocking_label.text()
+        assert dialog.btn_download_model.isHidden()
+
+    def test_download_blocked_for_local_model(self, qapp, tmp_path):
+        """本地模型目录不应被当作 HF 仓库去下载。"""
+        root = tmp_path / "ai_models"
+        model = _make_local_model(root)
+        settings = AiTimingSettings(
+            model_root=str(root), wav2vec2_model_id="my-model"
+        )
+        service = _FakeService(
+            _ready_snapshot(),
+            uses_local_model=True,
+            local_model_path=model,
+        )
+        dialog, _ = self._dialog(qapp, tmp_path, settings, service=service)
+        started = []
+        dialog._run_task = lambda *a, **k: started.append(a)
+        dialog._on_download_model()
+        assert started == []
+        assert settings.wav2vec2_model_id == "my-model"
+
+    def test_manual_edit_normalises_and_persists(self, qapp, tmp_path):
+        """手输路径（带引号/空格）→ 去引号、收相对路径并持久化。"""
+        root = tmp_path / "ai_models"
+        model = _make_local_model(root)
+        settings = AiTimingSettings(model_root=str(root))
+        dialog, _ = self._dialog(qapp, tmp_path, settings)
+        dialog.combo_model.setCurrentIndex(2)
+        for _ in range(20):
+            qapp.processEvents()
+        dialog.edit_custom_model.setText(f'  "{model}"  ')
+        dialog._on_custom_model_edited()
+        assert dialog.edit_custom_model.text() == str(model)
+        assert settings.wav2vec2_model_id == "my-model"
+        for _ in range(20):
+            qapp.processEvents()
+        TestPathChangeAppliesImmediately._wait_initial_refresh(qapp, dialog)
+
+
+class TestCustomModelWithRealService:
+    """用真实 AiTimingService 校验弹窗判定与服务契约一致（非 mock 属性）。"""
+
+    def _dialog(self, qapp, tmp_path):
+        from strange_uta_game.backend.application.ai_timing.models import (
+            ModelRegistry as _Registry,
+        )
+        from strange_uta_game.backend.application.ai_timing.resolver import (
+            PronunciationResolver,
+        )
+        from strange_uta_game.backend.application.ai_timing.service import (
+            AiTimingService as _Service,
+        )
+        from strange_uta_game.backend.application.ai_timing.vocals import (
+            AiCache,
+            VocalPreparationService,
+        )
+        from strange_uta_game.backend.infrastructure.parsers.ruby_analyzer import (
+            DummyAnalyzer,
+        )
+
+        root = tmp_path / "ai_models"
+        model = _make_valid_local_model(root)
+        audio = tmp_path / "song.flac"
+        audio.write_bytes(b"audio-bytes")
+        (tmp_path / "song_人声.wav").write_bytes(b"vocal-bytes")
+        settings = AiTimingSettings(
+            model_root=str(root), wav2vec2_model_id="my-model"
+        )
+        cache = AiCache(tmp_path / "cache")
+        registry = _Registry(root)
+        runtime = _StubRuntime()
+        service = _Service(
+            settings=settings,
+            cache=cache,
+            registry=registry,
+            runtime=runtime,
+            vocal_service=VocalPreparationService(cache),
+            resolver=PronunciationResolver(
+                analyzer=DummyAnalyzer(), chinese_mode=False
+            ),
+            worker_factory=lambda python: None,
+            separation_identity=lambda: {
+                "model": "m",
+                "stem": "人声",
+                "params": {},
+            },
+        )
+        dialog, _ = _make_dialog(
+            qapp,
+            tmp_path,
+            None,
+            [],
+            settings=settings,
+            service=service,
+            registry=registry,
+            runtime=runtime,
+        )
+        return dialog, service, model, settings
+
+    def test_relative_folder_name_is_recognised_as_local(self, qapp, tmp_path):
+        dialog, service, model, settings = self._dialog(qapp, tmp_path)
+        assert dialog.combo_model.currentIndex() == 2
+        assert dialog.edit_custom_model.text() == "my-model"
+        # 服务与弹窗必须同时认成本地模型（此前 UI 只看 intent 会显示下载按钮）
+        assert service.uses_local_model
+        assert dialog._is_local_model()
+        assert service.local_model_path == model.resolve()
+        assert dialog.btn_download_model.isHidden()
+        assert "本地模型" in dialog.row_model._state_label.text()
+        assert dialog.btn_run.isEnabled()
+        assert settings.wav2vec2_model_id == "my-model"
+
+    def test_switching_away_clears_and_back_keeps_reference(self, qapp, tmp_path):
+        dialog, _service, _model, settings = self._dialog(qapp, tmp_path)
+        dialog.combo_model.setCurrentIndex(1)  # MMS_FA
+        for _ in range(20):
+            qapp.processEvents()
+        TestPathChangeAppliesImmediately._wait_initial_refresh(qapp, dialog)
+        assert settings.provider == "mms_fa"
+        assert settings.wav2vec2_model_id == ""
+        dialog.combo_model.setCurrentIndex(2)  # 切回自定义：输入框内容仍在
+        for _ in range(20):
+            qapp.processEvents()
+        TestPathChangeAppliesImmediately._wait_initial_refresh(qapp, dialog)
+        assert settings.wav2vec2_model_id == "my-model"
 
 
 class TestPathChangeAppliesImmediately:

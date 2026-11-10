@@ -29,6 +29,13 @@ from strange_uta_game.backend.application.ai_timing.alignment import (
 from strange_uta_game.backend.application.ai_timing.commands import (
     ApplyAiTimingCommand,
 )
+from strange_uta_game.backend.application.ai_timing.local_models import (
+    has_local_model_intent,
+    is_url_reference,
+    local_model_fingerprint,
+    resolve_local_model_path,
+    validate_local_model_dir,
+)
 from strange_uta_game.backend.application.ai_timing.models import (
     ModelRegistry,
     ModelStatus,
@@ -233,6 +240,83 @@ class AiTimingService:
             return "MMS_FA"
         return self._settings.wav2vec2_model_id or DEFAULT_WAV2VEC2_MODEL
 
+    @property
+    def local_model_path(self) -> Optional[Path]:
+        """用户自选模型是本地目录时返回该目录，否则 None。
+
+        「自定义模型」既可能是 HF 仓库 ID（走注册表下载），也可能是用户
+        直接放进模型目录的文件夹；后者没有 manifest，不能交给注册表校验。
+        """
+        if self._settings.provider != "wav2vec2":
+            return None
+        return resolve_local_model_path(
+            self._settings.wav2vec2_model_id,
+            resolve_model_root(self._settings),
+        )
+
+    @property
+    def uses_local_model(self) -> bool:
+        """用户填的是本地路径（含路径填错/目录不完整的情况）。"""
+        if self._settings.provider != "wav2vec2":
+            return False
+        raw = self._settings.wav2vec2_model_id
+        if has_local_model_intent(raw, resolve_model_root(self._settings)):
+            return True
+        # 模型根下的文件夹名也能解析成目录（intent 的第二参数已覆盖，
+        # 这里兜底处理 intent 判不出但实际可用的输入）
+        return self.local_model_path is not None
+
+    @property
+    def model_cache_key(self) -> str:
+        """对齐缓存里记录的模型身份。
+
+        本地模型用「绝对目录 + 权重指纹」：用户可能把新权重覆盖进同一个
+        文件夹，只按目录区分会命中旧时间轴。
+        """
+        local = self.local_model_path
+        if local is not None:
+            fingerprint = local_model_fingerprint(local)
+            return f"{local}#{fingerprint}" if fingerprint else str(local)
+        return self.effective_model_id
+
+    def model_status(self) -> ModelStatus:
+        """当前模型可用性（managed 注册表 / 本地目录 / MMS_FA 三路）。"""
+        if self._settings.provider == "mms_fa":
+            return ModelStatus(state="ok", message="随对齐环境自动获取")
+        local = self.local_model_path
+        if local is not None:
+            return validate_local_model_dir(local)
+        if self.uses_local_model:
+            return ModelStatus(
+                state="missing",
+                message=(
+                    "本地模型目录不可用（不存在或缺少 config.json）："
+                    f"{self._settings.wav2vec2_model_id}"
+                ),
+            )
+        if is_url_reference(self._settings.wav2vec2_model_id):
+            return ModelStatus(
+                state="missing",
+                message=(
+                    "模型 ID 不能填网页地址：请填 Hugging Face 仓库 ID"
+                    "（作者/仓库名），或选择本地模型目录"
+                ),
+            )
+        status = self._registry.validate(self.effective_model_id)
+        if status.is_ready and (self._settings.wav2vec2_model_id or "").strip():
+            # 自定义仓库下载完成后立即做一次兼容性检查：不合规的仓库
+            # （Whisper/NeMo、假名词表…）在下一次执行前就给出中文原因，
+            # 而不是等 worker 跑到一半才失败
+            compatibility = validate_local_model_dir(status.model_dir)
+            if not compatibility.is_ready:
+                return ModelStatus(
+                    state="corrupt",
+                    model_dir=status.model_dir,
+                    manifest=status.manifest,
+                    message=f"自定义模型不兼容：{compatibility.message}",
+                )
+        return status
+
     def _worker_python(self) -> str:
         return self._settings.runtime_python or ""
 
@@ -290,10 +374,7 @@ class AiTimingService:
             )
         if probe_runtime:
             snap.runtime = self._runtime.probe(self._worker_python())
-        if self._settings.provider == "mms_fa":
-            snap.model = ModelStatus(state="ok", message="随对齐环境自动获取")
-        else:
-            snap.model = self._registry.validate(self.effective_model_id)
+        snap.model = self.model_status()
         snap.separation_follows_host = self._separation_follows_host
         if self._separation_prober is not None:
             try:
@@ -410,10 +491,11 @@ class AiTimingService:
             # 不走受控模型注册表（那套只服务 HF 仓模型）
             pass
         else:
-            model_status = self._registry.validate(self.effective_model_id)
+            model_status = self.model_status()
             if not model_status.is_ready:
                 raise AiTimingError(
-                    f"对齐模型未就绪：{model_status.message}。请先在弹窗中下载模型"
+                    f"对齐模型未就绪：{model_status.message}。"
+                    "请在弹窗「高级选项 → 对齐模型」中检查"
                 )
         runtime_python = self._worker_python()
         if runtime_python and not Path(runtime_python).is_file():
@@ -589,7 +671,7 @@ class AiTimingService:
             cache_options["windows_digest"] = digest
         cache_meta = alignment_cache_metadata(
             media_sha256=media_sha,
-            alignment_model=self.effective_model_id,
+            alignment_model=self.model_cache_key,
             annotation_digest=plan.annotation_digest,
             options=cache_options,
         )
@@ -601,11 +683,17 @@ class AiTimingService:
             progress("align", 100, "命中对齐缓存")
             return self._build_command(project, plan, request, result)
 
-        # 模型路径（已下载 → 本地目录；否则交给 provider 按 id 处理）
-        local_model = self._registry.resolve_model_path(self.effective_model_id)
+        # 模型路径：自定义/本地目录直接用该目录；受控下载 → 注册表目录；
+        # 都没有（不应发生，预检已拦）→ 原样交给 provider 按 id 处理
+        custom_path = self.local_model_path
+        if custom_path is not None:
+            model_ref = str(custom_path)
+        else:
+            downloaded = self._registry.resolve_model_path(self.effective_model_id)
+            model_ref = str(downloaded) if downloaded else self.effective_model_id
         model_spec = {
             "provider": self._settings.provider,
-            "model_id": str(local_model) if local_model else self.effective_model_id,
+            "model_id": model_ref,
             "device": self._settings.device,
         }
 
@@ -657,7 +745,7 @@ class AiTimingService:
                 request.windows = None
                 cache_meta = alignment_cache_metadata(
                     media_sha256=media_sha,
-                    alignment_model=self.effective_model_id,
+                    alignment_model=self.model_cache_key,
                     annotation_digest=plan.annotation_digest,
                     options={**options, "transcript_digest": transcript_digest},
                 )

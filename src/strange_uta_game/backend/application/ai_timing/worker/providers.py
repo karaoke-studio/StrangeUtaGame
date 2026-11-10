@@ -12,6 +12,7 @@ torchaudio MMS_FA bundle 的公开路径，不引入其 CLI 或私有 API。
 import gc
 import re
 from abc import ABC, abstractmethod
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from strange_uta_game.backend.application.ai_timing.alignment import (
@@ -479,6 +480,7 @@ class _TorchProviderBase(ForcedAlignmentProvider):
         self._model: Any = None
         self._device: Any = None
         self._model_id: str = ""
+        self._ctc_blank: Optional[int] = None
 
     def _select_device(self, torch, preference: str, progress) -> Any:
         """按偏好选设备：auto = CUDA → MPS（Apple 芯片）→ CPU；
@@ -976,11 +978,108 @@ class Wav2Vec2LatnProvider(_TorchProviderBase):
         _cancelled_check(cancel)
         try:
             self._processor = Wav2Vec2Processor.from_pretrained(self._model_id)
-            self._model = Wav2Vec2ForCTC.from_pretrained(self._model_id)
         except Exception as exc:
-            raise AlignmentProviderError(f"对齐模型加载失败：{exc}") from exc
+            # 只有「目录里根本没有 processor/preprocessor 配置」时才用默认
+            # 特征参数补齐（用户自行放入的模型常只带 tokenizer）。配置存在
+            # 却加载失败说明是别的问题，静默换成默认参数会丢掉用户设置
+            # 的采样率/归一化参数，反而让对齐质量悄悄退化。
+            if self._has_processor_config():
+                raise AlignmentProviderError(
+                    f"对齐模型加载失败：{exc}"
+                ) from exc
+            try:
+                from transformers import Wav2Vec2CTCTokenizer, Wav2Vec2FeatureExtractor
+
+                tokenizer = Wav2Vec2CTCTokenizer.from_pretrained(self._model_id)
+                feature_extractor = Wav2Vec2FeatureExtractor(
+                    feature_size=1,
+                    sampling_rate=16000,
+                    padding_value=0.0,
+                    do_normalize=True,
+                    return_attention_mask=False,
+                )
+                self._processor = Wav2Vec2Processor(
+                    feature_extractor=feature_extractor, tokenizer=tokenizer
+                )
+            except Exception as exc2:
+                raise AlignmentProviderError(
+                    "对齐模型加载失败（仅支持 Wav2Vec2 家族的 CTC 模型）："
+                    f"{exc2}"
+                ) from exc2
+        try:
+            self._model, loading_info = Wav2Vec2ForCTC.from_pretrained(
+                self._model_id, output_loading_info=True
+            )
+        except Exception as exc:
+            raise AlignmentProviderError(
+                "对齐模型加载失败（仅支持 Wav2Vec2 家族的 CTC 模型）："
+                f"{exc}"
+            ) from exc
+        self._reject_non_ctc_model(loading_info)
+        self._ctc_blank = self._resolve_ctc_blank()
         self._model.to(self._device)
         progress(50, "对齐模型就绪")
+
+    def _has_processor_config(self) -> bool:
+        """模型目录里是否自带 processor/preprocessor 配置（决定能否兜底）。"""
+        try:
+            directory = Path(self._model_id)
+        except (OSError, ValueError):
+            return True
+        if not directory.is_dir():
+            # 仓库 ID（预检已拦）：不猜，保留原始错误
+            return True
+        return any(
+            (directory / name).is_file()
+            for name in ("preprocessor_config.json", "processor_config.json")
+        )
+
+    def _reject_non_ctc_model(self, loading_info) -> None:
+        """拒绝基座模型/非 Wav2Vec2 CTC 模型（随机初始化的 CTC 头会静默出错）。"""
+        config = self._model.config
+        architectures = getattr(config, "architectures", None)
+        if isinstance(architectures, str):
+            architectures = [architectures]
+        names = [str(arch) for arch in (architectures or []) if arch]
+        if names and not any(
+            name.casefold() == "wav2vec2forctc" for name in names
+        ):
+            raise AlignmentProviderError(
+                "对齐模型不是 Wav2Vec2 CTC 模型"
+                f"（架构：{'、'.join(names)}），"
+                "仅支持 Wav2Vec2 家族的 Wav2Vec2ForCTC"
+            )
+        missing = [
+            str(key)
+            for key in ((loading_info or {}).get("missing_keys") or [])
+        ]
+        if any(key.startswith("lm_head.") for key in missing):
+            # 分类头没权重 = 加载的是基座/非 CTC 检查点；from_pretrained
+            # 只会警告并随机初始化，推理结果无法使用
+            raise AlignmentProviderError(
+                "模型缺少 CTC 分类头权重（lm_head.*），不是训练好的 "
+                "Wav2Vec2ForCTC 模型，无法用于强制对齐"
+            )
+
+    def _resolve_ctc_blank(self) -> int:
+        """确定 CTC blank id；缺失或越界时给出可操作的中文错误。"""
+        config = self._model.config
+        blank = getattr(config, "pad_token_id", None)
+        if blank is None:
+            blank = getattr(self._processor.tokenizer, "pad_token_id", None)
+        if blank is None:
+            raise AlignmentProviderError(
+                "模型未声明 CTC blank（config.pad_token_id 与分词器 pad 均为空），"
+                "无法进行强制对齐；请更换为训练好的 Wav2Vec2 CTC 模型"
+            )
+        blank = int(blank)
+        vocab_size = getattr(config, "vocab_size", None)
+        if vocab_size and not 0 <= blank < int(vocab_size):
+            raise AlignmentProviderError(
+                f"模型的 CTC blank（{blank}）超出词表范围（vocab_size="
+                f"{vocab_size}），分词器与模型不匹配"
+            )
+        return blank
 
     def align(
         self,
@@ -1027,7 +1126,22 @@ class Wav2Vec2LatnProvider(_TorchProviderBase):
             )
 
         progress(85, "计算对齐区间")
-        blank = self._model.config.pad_token_id
+        blank = self._ctc_blank
+        if blank is None:
+            blank = self._resolve_ctc_blank()
+        num_classes = int(emission.size(-1))
+        if not 0 <= blank < num_classes:
+            raise AlignmentProviderError(
+                f"模型输出的分类维度（{num_classes}）与 CTC blank（{blank}）"
+                "不一致，分词器与模型不匹配"
+            )
+        if any(blank in group for group in groups):
+            # tokenizer 把 blank 编进了待对齐文本：forced_align 会拒绝或
+            # 静默错位，属于模型与分词器不配套
+            raise AlignmentProviderError(
+                "分词器把 CTC blank token 编进了歌词文本（分词器与模型不匹配），"
+                "请更换为 Wav2Vec2 CTC 模型"
+            )
         duration_ms = int(round(waveform.size(1) / sample_rate * 1000))
         if request.windows:
             grouped = self._ctc_align_groups_windowed(

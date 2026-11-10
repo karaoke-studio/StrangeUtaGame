@@ -46,6 +46,14 @@ from qfluentwidgets import (
 from qfluentwidgets import InfoBar, InfoBarPosition
 
 from strange_uta_game.backend.application.ai_timing.ailog import ai_log_path, ailog
+from strange_uta_game.backend.application.ai_timing.local_models import (
+    is_network_path,
+    normalize_model_reference,
+    portable_model_reference,
+    resolve_local_model_path,
+    scan_local_models,
+    validate_local_model_dir,
+)
 from strange_uta_game.backend.application.ai_timing.models import (
     ModelDownloadService,
     ModelRegistry,
@@ -250,6 +258,14 @@ class AiTimingDialog(QDialog):
         self._busy = False
         # 模型下拉变更的延迟应用标记（防抖：连续快速切换只应用最后一次）
         self._model_apply_pending = False
+        # 本地模型列表是否有候选（任务结束后据此恢复控件可用状态）
+        self._has_local_candidates = False
+        # 延迟刷新：编辑自定义模型后自动刷新状态。用可停止的 QTimer 而不是
+        # QTimer.singleShot——下载/校验会在确认框的嵌套事件循环里等待，
+        # 0ms 定时器可能先把 _busy 置位，导致随后的下载被静默丢弃
+        self._refresh_timer = QTimer(self)
+        self._refresh_timer.setSingleShot(True)
+        self._refresh_timer.timeout.connect(self.refresh)
         self._eta_samples: List[tuple] = []
         self._task_started = 0.0
         self._last_eta_text = ""
@@ -270,6 +286,7 @@ class AiTimingDialog(QDialog):
         self._tick_timer.timeout.connect(self._on_second_tick)
 
         self._build_ui()
+        self._sync_model_ui()
         self.refresh()
 
     # ── UI ──
@@ -386,6 +403,7 @@ class AiTimingDialog(QDialog):
             [
                 self.tr("微调模型（推荐 · 日文歌曲效果最佳）"),
                 self.tr("MMS_FA 基础模型（多语言 · 通用备选）"),
+                self.tr("自定义模型（HF 仓库 / 本地目录）"),
             ]
         )
         self.combo_model.currentIndexChanged.connect(self._on_model_combo_changed)
@@ -398,6 +416,7 @@ class AiTimingDialog(QDialog):
         self.combo_device.addItems(
             [self.tr("自动"), "CPU", "CUDA", self.tr("MPS（Apple 芯片）")]
         )
+        self.combo_device.currentIndexChanged.connect(self._persist_settings)
         advanced.addWidget(self.combo_device)
         # 对齐范围（上游评审：分窗必须直观可选，不得直接替换整曲解码）
         advanced.addWidget(BodyLabel(self.tr("对齐范围:"), content))
@@ -414,6 +433,57 @@ class AiTimingDialog(QDialog):
         self.combo_align_scope.currentIndexChanged.connect(self._persist_settings)
         advanced.addWidget(self.combo_align_scope)
         self._box_adv.contentLayout.addLayout(advanced)
+
+        # ── 自定义模型（仅「自定义模型」选中时出现）──
+        # 两条来源：HF 仓库 ID（走受控下载）/ 本地目录（用户直接把模型
+        # 文件夹放进模型目录，无需下载流程）。两者都只支持 Wav2Vec2 家族。
+        self.custom_model_panel = QWidget(content)
+        custom_layout = QVBoxLayout(self.custom_model_panel)
+        custom_layout.setContentsMargins(0, 0, 0, 0)
+        custom_layout.setSpacing(6)
+
+        source_row = QHBoxLayout()
+        source_row.addWidget(BodyLabel(self.tr("仓库 ID / 本地目录:"), content))
+        self.edit_custom_model = LineEdit(content)
+        self.edit_custom_model.setPlaceholderText(
+            self.tr("例如 your-name/your-wav2vec2-ctc-model，或模型文件夹路径")
+        )
+        self.edit_custom_model.editingFinished.connect(self._on_custom_model_edited)
+        source_row.addWidget(self.edit_custom_model, 1)
+        self.btn_browse_model = PushButton(self.tr("浏览…"), content)
+        self.btn_browse_model.setFixedHeight(26)
+        self.btn_browse_model.clicked.connect(self._on_browse_model_dir)
+        source_row.addWidget(self.btn_browse_model)
+        custom_layout.addLayout(source_row)
+
+        local_row = QHBoxLayout()
+        local_row.addWidget(BodyLabel(self.tr("模型目录中已放入:"), content))
+        self.combo_local_models = ComboBox(content)
+        self.combo_local_models.setMinimumWidth(240)
+        self.combo_local_models.currentIndexChanged.connect(
+            self._on_local_model_picked
+        )
+        local_row.addWidget(self.combo_local_models, 1)
+        self.btn_scan_models = PushButton(self.tr("刷新"), content)
+        self.btn_scan_models.setFixedHeight(26)
+        self.btn_scan_models.clicked.connect(self._on_scan_models)
+        local_row.addWidget(self.btn_scan_models)
+        custom_layout.addLayout(local_row)
+
+        hint = CaptionLabel(
+            self.tr(
+                "自定义模型仅支持 Wav2Vec2 家族（Wav2Vec2ForCTC 架构 + 拉丁字母/"
+                "罗马字词表）；Whisper、NeMo 等其它架构，或假名/汉字词表无法"
+                "用于本对齐流程。可直接把模型文件夹放进下方「模型目录」，"
+                "再从上拉列表选择。"
+            ),
+            content,
+        )
+        hint.setWordWrap(True)
+        custom_layout.addWidget(hint)
+        self.custom_model_panel.hide()
+        self._box_adv.contentLayout.addWidget(self.custom_model_panel)
+
         self._box_adv.contentLayout.addWidget(self.model_desc)
         # 能力探测：工程无行时间戳时置灰并说明原因（不做静默降级）
         self._update_align_scope_availability()
@@ -618,6 +688,10 @@ class AiTimingDialog(QDialog):
             self.combo_align_scope,
             self.combo_mirror,
             self.edit_mirror,
+            self.edit_custom_model,
+            self.btn_browse_model,
+            self.combo_local_models,
+            self.btn_scan_models,
         ]
 
     def _cleanup_task(self) -> None:
@@ -633,6 +707,9 @@ class AiTimingDialog(QDialog):
             b.setEnabled(True)
         for w in self._advanced_widgets():
             w.setEnabled(True)
+        # 本地模型下拉的可用性由「模型目录里有没有候选」决定，不能随任务
+        # 结束一律启用（空目录时占位项不应可点）
+        self.combo_local_models.setEnabled(self._has_local_candidates)
 
     def _on_task_progress(self, stage: str, percent: int, message: str) -> None:
         self.progress.setValue(max(0, min(100, percent)))
@@ -771,8 +848,13 @@ class AiTimingDialog(QDialog):
     # ── 设置读写 ──
 
     def _persist_settings(self) -> None:
-        self._settings.provider = (
-            "wav2vec2" if self.combo_model.currentIndex() == 0 else "mms_fa"
+        index = self.combo_model.currentIndex()
+        self._settings.provider = "mms_fa" if index == 1 else "wav2vec2"
+        # 自定义模型：index 2 时把输入框内容写回 wav2vec2_model_id（HF 仓库
+        # ID 或本地目录）；选默认/MMS_FA 时清空，避免界面显示默认模型而
+        # 实际仍跑着自定义模型（输入框内容在同一次会话内保留，切回即可复用）
+        self._settings.wav2vec2_model_id = (
+            self._custom_model_reference() if index == 2 else ""
         )
         self._settings.device = ("auto", "cpu", "cuda", "mps")[
             self.combo_device.currentIndex()
@@ -836,23 +918,219 @@ class AiTimingDialog(QDialog):
         # 自定义 URL 输入结束（回车 / 失焦）→ 持久化并同步端点
         self._persist_settings()
 
-    MODEL_DESCRIPTIONS = {
-        0: (
-            "NextFire 日语卡拉 OK 微调模型（约 3 亿参数，MMS 架构）：针对"
-            "日文歌词的罗马字对齐专门微调，日文歌曲首选；首次使用需下载"
-            "约 1.2GB 权重。中英韩文歌曲也可使用，走拼音/读音/谚文转写。"
-        ),
-        1: (
-            "Meta MMS 多语言基础对齐模型（约 4.7 亿参数，torchaudio 内置"
-            "分发）：语言覆盖广、无需手动下载大文件，但对日文卡拉 OK 场景"
-            "的精度通常不如微调模型；作为兼容备选。"
-        ),
-    }
-
     def _update_model_desc(self, index: int) -> None:
-        self.model_desc.setText(
-            self.tr(self.MODEL_DESCRIPTIONS.get(index, ""))
+        # 每个分支都直接用字面量 self.tr(...)：pylupdate6 只能提取字面量，
+        # 通过 dict.get(index) 取变量会让描述永远不进翻译文件
+        if index == 0:
+            text = self.tr(
+                "NextFire 日语卡拉 OK 微调模型（约 3 亿参数，MMS 架构）：针对"
+                "日文歌词的罗马字对齐专门微调，日文歌曲首选；首次使用需下载"
+                "约 1.2GB 权重。中英韩文歌曲也可使用，走拼音/读音/谚文转写。"
+            )
+        elif index == 1:
+            text = self.tr(
+                "Meta MMS 多语言基础对齐模型（约 4.7 亿参数，torchaudio 内置"
+                "分发）：语言覆盖广、无需手动下载大文件，但对日文卡拉 OK 场景"
+                "的精度通常不如微调模型；作为兼容备选。"
+            )
+        elif index == 2:
+            text = self.tr(
+                "自定义模型：填写 Hugging Face 仓库 ID，或把已经下载好的模型"
+                "文件夹直接放进「模型目录」后从列表选择。仅支持 Wav2Vec2 家族"
+                "（Wav2Vec2ForCTC + 拉丁字母/罗马字词表）；Whisper、NeMo 等"
+                "其它架构或假名/汉字词表无法使用。"
+            )
+        else:
+            text = ""
+        self.model_desc.setText(text)
+
+    # ── 自定义模型（HF 仓库 / 本地目录）──
+
+    def _sync_model_ui(self) -> None:
+        """按 settings 回显模型与设备下拉。
+
+        此前模型/设备下拉从不回显（打开弹窗永远显示第一项），动一下别的
+        设置就会把 provider 写回 wav2vec2、把设备写回 auto；加入自定义
+        模型后这条路径必须修好，否则自定义选择在界面上根本看不出来。
+        """
+        custom = (self._settings.wav2vec2_model_id or "").strip()
+        if self._settings.provider == "mms_fa":
+            index = 1
+        elif custom:
+            index = 2
+        else:
+            index = 0
+        device_index = {"auto": 0, "cpu": 1, "cuda": 2, "mps": 3}.get(
+            self._settings.device, 0
         )
+        self.combo_model.blockSignals(True)
+        self.combo_device.blockSignals(True)
+        try:
+            self.combo_model.setCurrentIndex(index)
+            self.edit_custom_model.setText(custom)
+            self.combo_device.setCurrentIndex(device_index)
+        finally:
+            self.combo_model.blockSignals(False)
+            self.combo_device.blockSignals(False)
+        self._update_model_desc(index)
+        self._update_custom_model_visibility()
+        self._scan_local_models()
+
+    def _update_custom_model_visibility(self) -> None:
+        self.custom_model_panel.setVisible(self.combo_model.currentIndex() == 2)
+
+    def _custom_model_reference(self) -> str:
+        """输入框内容 → 写入设置的引用（模型根内的目录收成相对路径）。
+
+        本地模型若以绝对路径持久化，便携包移动或宿主更换模型根后就会失效；
+        模型根本身/根外目录保持原值。
+        """
+        raw = normalize_model_reference(self.edit_custom_model.text())
+        if not raw:
+            return ""
+        return portable_model_reference(raw, resolve_model_root(self._settings))
+
+    def _is_local_model(self) -> bool:
+        """当前选中的是否是本地目录模型（含路径填错的情况）。"""
+        return bool(
+            getattr(self._service, "local_model_path", None)
+            or getattr(self._service, "uses_local_model", False)
+        )
+
+    def _schedule_refresh(self) -> None:
+        """延迟刷新状态（可被 _on_download_model/_on_deep_recheck 取消）。"""
+        self._refresh_timer.start(0)
+
+    def _scan_local_models(self, *, force: bool = False) -> None:
+        """重建「模型目录中已放入」列表（只扫目录，不解码权重）。
+
+        网络共享上的目录逐项探测会阻塞 UI 线程，因此打开弹窗/切换模型时
+        不自动扫描，改为用户显式点「刷新」（force=True）时才扫。
+        非自定义模型下也无需扫描（面板隐藏、列表用不到）。
+        """
+        if not force and self.combo_model.currentIndex() != 2:
+            return
+        root = resolve_model_root(self._settings)
+        if not force and is_network_path(root):
+            self._has_local_candidates = False
+            self.combo_local_models.blockSignals(True)
+            try:
+                self.combo_local_models.clear()
+                self.combo_local_models.addItem(
+                    self.tr("（网络目录：点「刷新」扫描）"), userData=""
+                )
+                self.combo_local_models.setEnabled(False)
+            finally:
+                self.combo_local_models.blockSignals(False)
+            return
+        candidates = scan_local_models(root)
+        self._has_local_candidates = bool(candidates)
+        current = self._custom_model_reference()
+        target = None
+        if current:
+            target = resolve_local_model_path(current, root)
+            if target is None:
+                try:
+                    target = (root / current).resolve()
+                except OSError:  # pragma: no cover - 极端文件系统错误
+                    target = None
+        self.combo_local_models.blockSignals(True)
+        try:
+            self.combo_local_models.clear()
+            self.combo_local_models.addItem(
+                self.tr("（从模型目录选择…）")
+                if candidates
+                else self.tr("（模型目录里还没有模型）"),
+                userData="",
+            )
+            for item in candidates:
+                self.combo_local_models.addItem(
+                    item.label, userData=str(item.path)
+                )
+            self.combo_local_models.setEnabled(bool(candidates))
+            if target is not None:
+                for index in range(self.combo_local_models.count()):
+                    selected = self.combo_local_models.itemData(index)
+                    if not selected:
+                        continue
+                    try:
+                        if Path(str(selected)).resolve() == target:
+                            self.combo_local_models.setCurrentIndex(index)
+                            break
+                    except OSError:  # pragma: no cover
+                        continue
+        finally:
+            self.combo_local_models.blockSignals(False)
+
+    def _on_local_model_picked(self, *_args) -> None:
+        path = str(self.combo_local_models.currentData() or "")
+        if not path:
+            return
+        current = self.edit_custom_model.text().strip()
+        if current:
+            try:
+                if Path(current).resolve() == Path(path).resolve():
+                    return  # 已经是当前选中的模型：不重复持久化/刷新
+            except OSError:  # pragma: no cover - 极端文件系统错误
+                if current == path:
+                    return
+        self.edit_custom_model.setText(path)
+        self._persist_settings()
+        # 延迟到下一轮事件循环：当前在弹层（RoundMenu）激活栈内，直接
+        # 起刷新线程会与弹层销毁竞争（与模型下拉同一处理）
+        self._schedule_refresh()
+
+    def _on_browse_model_dir(self) -> None:
+        root = resolve_model_root(self._settings)
+        current = self.edit_custom_model.text().strip()
+        if current and Path(current).is_dir():
+            start = current
+        elif current:
+            # 设置里可能存的是模型根下的相对文件夹名：从解析后的位置开始
+            start = str(resolve_local_model_path(current, root) or root)
+        else:
+            start = str(root)
+        chosen = QFileDialog.getExistingDirectory(
+            self, self.tr("选择模型目录（含 config.json 的文件夹）"), start
+        )
+        if not chosen:
+            return
+        self.edit_custom_model.setText(chosen)
+        self._persist_settings()
+        self._schedule_refresh()
+
+    def _on_scan_models(self) -> None:
+        self._scan_local_models(force=True)
+        count = 0
+        if self.combo_local_models.isEnabled():
+            count = max(0, self.combo_local_models.count() - 1)
+        InfoBar.info(
+            title=self.tr("已扫描模型目录"),
+            content=self.tr("发现 {n} 个可选的本地模型。").format(n=count),
+            orient=Qt.Orientation.Horizontal,
+            isClosable=True,
+            position=InfoBarPosition.TOP,
+            duration=3000,
+            parent=self,
+        )
+        # 列表可能已删/换：顺带复核当前模型状态，避免状态行停留在旧结果
+        self._schedule_refresh()
+
+    def _on_custom_model_edited(self) -> None:
+        """输入框编辑结束（回车/失焦）：仅自定义模式下持久化并刷新。"""
+        if self.combo_model.currentIndex() != 2:
+            return
+        value = normalize_model_reference(self.edit_custom_model.text())
+        if value != self.edit_custom_model.text():
+            self.edit_custom_model.setText(value)
+        if self._custom_model_reference() == (
+            self._settings.wav2vec2_model_id or ""
+        ).strip():
+            return
+        self._persist_settings()
+        # 延迟刷新：用户常是「输完路径直接点下载」，同步 refresh 会抢先
+        # 把 _busy 置位，随后的点击会被 _run_task 静默吞掉
+        self._schedule_refresh()
 
     def _has_line_anchors(self) -> bool:
         """工程是否存在可用作分窗锚点的行时间戳。
@@ -899,6 +1177,7 @@ class AiTimingDialog(QDialog):
         防抖合并连续切换，只应用最后一次。
         """
         self._update_model_desc(self.combo_model.currentIndex())
+        self._update_custom_model_visibility()
         if self._busy or self._model_apply_pending:
             return
         self._model_apply_pending = True
@@ -908,6 +1187,9 @@ class AiTimingDialog(QDialog):
         self._model_apply_pending = False
         if self._busy:
             return
+        if self.combo_model.currentIndex() == 2:
+            # 切到自定义时重扫模型目录（用户可能刚把文件夹放进去）
+            self._scan_local_models()
         self._persist_settings()
         self.refresh()
 
@@ -1068,13 +1350,44 @@ class AiTimingDialog(QDialog):
             )
 
         model = snapshot.model
-        is_mms = self.combo_model.currentIndex() == 1
-        self.btn_download_model.setVisible(not is_mms)
-        self.btn_recheck.setVisible(not is_mms)
+        is_mms = self._settings.provider == "mms_fa"
+        is_local = self._is_local_model()
+        # 「自定义模型」已选中但输入框为空：这是明确的未选择状态，不能
+        # 静默回落默认模型（否则界面写自定义、实际跑 NextFire）
+        custom_empty = (
+            self.combo_model.currentIndex() == 2
+            and not (self._settings.wav2vec2_model_id or "").strip()
+        )
+        self.btn_download_model.setVisible(
+            not is_mms and not is_local and not custom_empty
+        )
+        self.btn_recheck.setVisible(not is_mms and not custom_empty)
         if is_mms:
             self.row_model.set_state(
                 "ok", self.tr("MMS_FA（备选）：随对齐环境自动获取，无需下载")
             )
+        elif custom_empty:
+            self.row_model.set_state(
+                "warn",
+                self.tr("未选择自定义模型：请填写仓库 ID 或从本地模型列表选择"),
+            )
+        elif is_local:
+            if model is not None and model.is_ready:
+                self.row_model.set_state(
+                    "ok",
+                    self.tr("本地模型：{path}").format(
+                        path=self._elide_text(model.model_dir)
+                    ),
+                )
+            else:
+                self.row_model.set_state(
+                    "error",
+                    (model.message if model else "")
+                    or self.tr("本地模型不可用"),
+                )
+        elif model is not None and model.state in ("corrupt", "incomplete"):
+            # 已下载但校验/兼容性不通过：直接显示原因，别覆盖成「未安装」
+            self.row_model.set_state("error", model.message)
         elif model is not None and model.is_ready:
             self.row_model.set_state("ok", self._elide_text(model.model_dir))
         else:
@@ -1090,7 +1403,11 @@ class AiTimingDialog(QDialog):
         self._row_cache_dir._refresh()
         self._row_runtime._refresh()
 
-        reasons = snapshot.blocking_reasons
+        reasons = list(snapshot.blocking_reasons)
+        if custom_empty:
+            reasons.append(
+                "自定义模型未选择：请填写仓库 ID 或从本地模型列表选择"
+            )
         if reasons:
             self.blocking_label.setText(
                 self.tr("执行前需解决：\n") + "\n".join(reasons)
@@ -1145,8 +1462,13 @@ class AiTimingDialog(QDialog):
         except Exception:
             pass
 
-    def _confirm_disk_usage(self, estimate_gb: float, detail: str = "") -> bool:
-        """大体积下载/安装前的占用提醒：预计大小 + 磁盘实际剩余。"""
+    def _confirm_disk_usage(
+        self, estimate_gb: Optional[float], detail: str = ""
+    ) -> bool:
+        """大体积下载/安装前的占用提醒：预计大小 + 磁盘实际剩余。
+
+        ``estimate_gb=None``：体积未知（自定义仓库），只报剩余空间。
+        """
         import shutil as _shutil
 
         free_gb = None
@@ -1162,48 +1484,124 @@ class AiTimingDialog(QDialog):
             pass
         if free_gb is not None:
             free_text = self.tr("，磁盘剩余 {g:.0f}GB").format(g=free_gb)
-            if free_gb < estimate_gb:
+            if estimate_gb is not None and free_gb < estimate_gb:
                 free_text += self.tr("（空间不足！）")
         else:
             free_text = ""
+        if estimate_gb is None:
+            message = self.tr("{detail}预计占用取决于模型仓库大小{free}，是否继续？")
+        else:
+            message = self.tr("{detail}预计占用约 {e:g}GB{free}，是否继续？")
         return message_question(
             self,
             self.tr("磁盘占用提醒"),
-            self.tr("{detail}预计占用约 {e:g}GB{free}，是否继续？").format(
-                detail=detail, e=estimate_gb, free=free_text
-            ),
+            message.format(detail=detail, e=estimate_gb or 0, free=free_text),
             yes_text=self.tr("继续"),
             no_text=self.tr("取消"),
             default_cancel=False,
         )
 
+    def _reject_if_busy(self) -> bool:
+        """任务进行中：明确提示而不是静默无反应（_run_task 会直接早退）。"""
+        if not self._busy:
+            return False
+        InfoBar.info(
+            title=self.tr("正在检查执行条件"),
+            content=self.tr("状态检查尚未完成，请稍后再试。"),
+            orient=Qt.Orientation.Horizontal,
+            isClosable=True,
+            position=InfoBarPosition.TOP,
+            duration=3000,
+            parent=self,
+        )
+        return True
+
     def _on_download_model(self) -> None:
-        model_id = self._service.effective_model_id
-        if not self._confirm_disk_usage(
-            DISK_EST_MODEL_GB,
-            self.tr("下载默认对齐模型（权重约 1.2GB）。"),
-        ):
-            return
-
-        def _task(progress_cb, cancel_check):
-            return self._download_service.download(
-                model_id,
-                "wav2vec2" if self._settings.provider == "wav2vec2" else "mms_fa",
-                license_text="CC-BY-NC-SA-4.0（仅限非商业使用）",
-                progress=lambda p, m: progress_cb("model", p, m),
-                cancel=cancel_check,
-            )
-
-        def _done(result) -> None:
-            InfoBar.success(
-                title=self.tr("模型下载完成"),
-                content=self.tr("对齐模型已就绪。"),
+        # 取消待执行的自动刷新：它会在确认框的嵌套事件循环里到期，先把
+        # _busy 置位，让这次下载被 _run_task 静默丢掉
+        self._refresh_timer.stop()
+        # 先落一次设置：用户可能刚在输入框里填完仓库 ID / 目录就直接点下载
+        # （editingFinished 与 clicked 的先后顺序不保证），同时也同步下载端点
+        self._persist_settings()
+        if self._is_local_model():
+            # 本地目录不需要下载，也不能拿目录路径去请求 HF
+            InfoBar.info(
+                title=self.tr("本地模型"),
+                content=self.tr("当前选择的是本地模型目录，无需下载。"),
                 orient=Qt.Orientation.Horizontal,
                 isClosable=True,
                 position=InfoBarPosition.TOP,
                 duration=3000,
                 parent=self,
             )
+            return
+        if self._reject_if_busy():
+            return
+        model_id = self._service.effective_model_id
+        custom = bool((self._settings.wav2vec2_model_id or "").strip())
+        if custom:
+            # 自定义仓库体积未知，许可也各不相同：不做具体承诺
+            confirmed = self._confirm_disk_usage(
+                None,
+                self.tr(
+                    "下载自定义对齐模型（体积取决于仓库，可能超过 1GB；"
+                    "请自行确认该模型的许可证与使用条款）。"
+                ),
+            )
+        else:
+            confirmed = self._confirm_disk_usage(
+                DISK_EST_MODEL_GB,
+                self.tr("下载默认对齐模型（权重约 1.2GB）。"),
+            )
+        if not confirmed:
+            return
+        # 确认框期间可能已完成一次状态刷新（_busy 置位）：再确认一次，
+        # 宁可给提示也不要静默不下载
+        if self._reject_if_busy():
+            return
+
+        def _task(progress_cb, cancel_check):
+            return self._download_service.download(
+                model_id,
+                "wav2vec2" if self._settings.provider == "wav2vec2" else "mms_fa",
+                license_text=(
+                    "" if custom else "CC-BY-NC-SA-4.0（仅限非商业使用）"
+                ),
+                progress=lambda p, m: progress_cb("model", p, m),
+                cancel=cancel_check,
+            )
+
+        def _done(result) -> None:
+            # 下载成功 ≠ 可用：自定义仓库可能是 Whisper/NeMo 或非拉丁词表，
+            # 下载后由 model_status 判定；据此决定提示，避免「已就绪」与
+            # 状态行的不兼容原因互相矛盾
+            status = None
+            checker = getattr(self._service, "model_status", None)
+            if callable(checker):
+                try:
+                    status = checker()
+                except Exception:
+                    status = None
+            if status is not None and not status.is_ready:
+                InfoBar.warning(
+                    title=self.tr("模型已下载，但无法使用"),
+                    content=status.message,
+                    orient=Qt.Orientation.Horizontal,
+                    isClosable=True,
+                    position=InfoBarPosition.TOP,
+                    duration=8000,
+                    parent=self,
+                )
+            else:
+                InfoBar.success(
+                    title=self.tr("模型下载完成"),
+                    content=self.tr("对齐模型已就绪。"),
+                    orient=Qt.Orientation.Horizontal,
+                    isClosable=True,
+                    position=InfoBarPosition.TOP,
+                    duration=3000,
+                    parent=self,
+                )
             self.refresh()
 
         self._run_task(
@@ -1495,6 +1893,8 @@ class AiTimingDialog(QDialog):
             self._persist_settings()
             # 注册表原地换根：下载/校验立即用新目录，无需重开窗口
             self._registry.retarget(Path(chosen))
+            # 自定义模型列表跟随新模型目录（换目录后旧列表会误导）
+            self._scan_local_models()
             self._notify_path_applied()
             self.refresh()
 
@@ -1548,11 +1948,13 @@ class AiTimingDialog(QDialog):
 
     def _on_reset_settings(self) -> None:
         self._settings.provider = "wav2vec2"
+        self._settings.wav2vec2_model_id = ""
         self._settings.device = "auto"
         self._settings.tail_snap = True
         self._settings.download_mirror = ""
         # 对齐范围一并复原为界面承诺的默认「整曲」
         self._settings.align_scope = "whole"
+        self.edit_custom_model.clear()
         self.combo_model.setCurrentIndex(0)
         self.combo_device.setCurrentIndex(0)
         combo_scope = getattr(self, "combo_align_scope", None)
@@ -1564,11 +1966,34 @@ class AiTimingDialog(QDialog):
         self.refresh()
 
     def _on_deep_recheck(self) -> None:
-        """深度重新校验（sha256 重算，§3.3「重新校验」）。"""
+        """深度重新校验（受控模型重算 sha256；本地模型检查架构/词表）。"""
+        # 与下载同口径：先取消待刷新并落一次设置，否则校验的是输入框里
+        # 上一版模型
+        self._refresh_timer.stop()
+        self._persist_settings()
+        if self._reject_if_busy():
+            return
         model_id = self._service.effective_model_id
+        local_path = getattr(self._service, "local_model_path", None)
+        custom = bool((self._settings.wav2vec2_model_id or "").strip())
 
         def _task(progress_cb, cancel_check):
-            status = self._registry.validate(model_id, deep=True)
+            if local_path is not None:
+                status = validate_local_model_dir(local_path)
+            elif self._is_local_model():
+                # 本地路径填错/目录不完整：复用服务的解释，别去注册表
+                # 里按「仓库 ID」查一个目录路径
+                status = self._service.model_status()
+            else:
+                status = self._registry.validate(model_id, deep=True)
+                if status.is_ready and custom:
+                    # manifest 只证明文件齐全；自定义仓库还要过架构/词表
+                    # 门禁，与执行前预检同口径
+                    checker = getattr(self._service, "model_status", None)
+                    if callable(checker):
+                        compatible = checker()
+                        if not compatible.is_ready:
+                            status = compatible
             progress_cb("recheck", 100, self.tr("校验完成"))
             return status
 

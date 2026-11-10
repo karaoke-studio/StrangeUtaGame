@@ -54,6 +54,18 @@ from .models import (
     ModelStatus,
     HfHubTransport,
 )
+from .local_models import (
+    LOCAL_MODEL_SUPPORT_HINT,
+    LocalModelCandidate,
+    has_local_model_intent,
+    is_network_path,
+    is_url_reference,
+    local_model_fingerprint,
+    portable_model_reference,
+    resolve_local_model_path,
+    scan_local_models,
+    validate_local_model_dir,
+)
 from .runtime import AiRuntimeError, AiRuntimeManager, RuntimeStatus
 from .vocals import (
     AiCache,
@@ -112,6 +124,17 @@ __all__ = [
     "ModelRegistryError",
     "ModelStatus",
     "HfHubTransport",
+    # 阶段 D（自定义 / 本地模型）
+    "LOCAL_MODEL_SUPPORT_HINT",
+    "LocalModelCandidate",
+    "has_local_model_intent",
+    "is_network_path",
+    "is_url_reference",
+    "local_model_fingerprint",
+    "portable_model_reference",
+    "resolve_local_model_path",
+    "scan_local_models",
+    "validate_local_model_dir",
     "AiRuntimeError",
     "AiRuntimeManager",
     "RuntimeStatus",

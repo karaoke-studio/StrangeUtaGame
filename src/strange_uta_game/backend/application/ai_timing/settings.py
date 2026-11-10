@@ -30,7 +30,13 @@ class AiTimingSettings:
     """对齐 provider：wav2vec2（默认效果优先）/ mms_fa（备选）。"""
 
     wav2vec2_model_id: str = ""
-    """微调模型 ID（Hugging Face repo id 或本地路径）；空 = 内置默认。"""
+    """自定义对齐模型：空 = 内置默认。
+
+    可填 Hugging Face 仓库 ID（走受控下载），或本地模型目录（用户直接
+    放进模型目录的文件夹，也接受相对于模型根的文件夹名）。仅支持
+    Wav2Vec2 家族的 CTC 模型 + 拉丁字母/罗马字词表，见
+    ``local_models.LOCAL_MODEL_SUPPORT_HINT``。
+    """
 
     device: str = "auto"
     """推理设备：auto / cpu / cuda。"""

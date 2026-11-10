@@ -33,13 +33,28 @@ CANCEL_CB = Callable[[], bool]
 MANIFEST_NAME = "manifest.json"
 PART_SUFFIX = ".part"
 
-# Wav2Vec2 模型需要的文件类型；排除 TF/Flax/ONNX 权重与冗余大文件
+# Wav2Vec2 模型需要的文件类型；排除 TF/Flax/ONNX 权重与冗余大文件。
+# ``.bin`` / ``.model``：自定义（非默认）仓库可能只发 pytorch_model.bin，
+# 或带 SentencePiece 的 tokenizer.model；不放进白名单会导致「仓库里有
+# 模型但下载不到任何文件」。权重去重见 filter_model_files。
 _INCLUDED_EXTENSIONS = {
     ".json",
     ".txt",
     ".safetensors",
+    ".bin",
+    ".model",
 }
 _EXCLUDED_NAMES = {".gitattributes", "README.md"}
+
+_BIN_WEIGHT_NAMES = {"pytorch_model.bin", "adapter_model.bin"}
+"""允许下载的 .bin 权重文件名（其余 .bin 多为训练产物，不进下载清单）。"""
+
+
+def _is_weight_bin(filename: str) -> bool:
+    base = Path(filename).name
+    return base in _BIN_WEIGHT_NAMES or (
+        base.startswith("pytorch_model-") and base.endswith(".bin")
+    )
 
 
 class ModelRegistryError(RuntimeError):
@@ -302,14 +317,31 @@ def filter_model_files(files: List[Tuple[str, int]]) -> List[Tuple[str, int]]:
     条目兼容 ``(name, size)`` 与 ``(name, size, sha256)`` 两种形态，
     返回时保持原形态（sha256 为远端 LFS oid，透传给下载编排做完整性
     比对，防止损坏权重「自证」校验通过）。
+
+    同一仓库同时提供 ``.safetensors`` 与 ``.bin`` 时只保留 safetensors：
+    ``.bin`` 是同一份权重的另一种序列化，两份都下会白占一倍磁盘与流量。
     """
-    return [
+    kept = [
         item
         for item in files
         if item[0] not in _EXCLUDED_NAMES
         and Path(item[0]).suffix.lower() in _INCLUDED_EXTENSIONS
         and ".cache" not in item[0].split("/")
+        and (
+            Path(item[0]).suffix.lower() != ".bin"
+            or _is_weight_bin(item[0])
+        )
     ]
+    names = [item[0] for item in kept]
+    has_safetensors = any(Path(name).suffix.lower() == ".safetensors" for name in names)
+    # 分片 bin 仓库会带 index.json 指向每一片；此时不能因为存在 safetensors
+    # 就丢掉 bin（否则可能丢掉唯一完整的权重）
+    has_bin_index = any(
+        name.endswith("pytorch_model.bin.index.json") for name in names
+    )
+    if has_safetensors and not has_bin_index:
+        kept = [item for item in kept if not _is_weight_bin(item[0])]
+    return kept
 
 
 class HfHubTransport(ModelDownloadTransport):

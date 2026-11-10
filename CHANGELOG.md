@@ -22,11 +22,15 @@
 
 - **AI 打轴支持自定义对齐模型**（AI 打轴窗口 → 高级选项 → 对齐模型 → 自定义模型）
   - 可填 Hugging Face 仓库 ID 走受控下载（镜像、断点续传、完整性校验照旧），也可把已下载的模型文件夹**直接放进模型目录**，在弹窗「模型目录中已放入」列表中一键选择，无需经过下载流程；支持模型根下的文件夹、多套一层目录，以及文件直接摊在模型根里三种放法
-  - **仅支持 Wav2Vec2 家族**（`Wav2Vec2ForCTC` 架构 + 拉丁字母/罗马字词表）：对齐链路会把读音罗马化后送进 CTC，其它架构或假名/汉字词表不会报错，而是安静地产出错误时间轴——因此弹窗说明、下载与执行前预检共用同一句提示，本地目录在选中时即检查架构、权重（含 Git LFS 指针识别）、分词器与词表覆盖面，选错时给出可操作的中文原因；自定义仓库下载完成后也会跑同一次检查，不等 worker 跑到一半才失败
-  - 本地模型按「目录 + 权重 size/mtime」记入对齐缓存键：把新权重覆盖进同一个文件夹后不会命中旧时间轴
+  - **仅支持 Wav2Vec2 家族**（`Wav2Vec2ForCTC` 架构 + 拉丁字母/罗马字词表）：对齐链路会把读音罗马化后送进 CTC，其它架构或假名/汉字词表不会报错，而是安静地产出错误时间轴——因此弹窗说明、下载与执行前预检共用同一句提示，本地目录在选中时即检查架构、权重（含 Git LFS 指针识别）、分词器与词表覆盖面，选错时给出可操作的中文原因；`architectures` 写成字符串/大小写不同也能识别，两者都缺失则拒绝；分词器要求 vocab.json / vocab.txt 形式（SentencePiece 二进制 `tokenizer.model` 无法校验词表，直接拒绝）；自定义仓库下载完成后也会跑同一次检查，不等 worker 跑到一半才失败
+  - 本地模型按「目录 + 全部权重与配置/分词器文件的指纹」记入对齐缓存键：换权重、改词表或只替换一个分片都不会再命中旧时间轴
+  - 模型目录内的本地模型以**相对路径**持久化：便携包整体移动、宿主更换模型根后仍可解析（根外目录保留绝对路径）
+  - 「自定义模型」已选中但没填内容时明确显示「未选择自定义模型」并阻断执行，不再静默回落默认模型；本地目录不提供「下载」，点下载也只提示无需下载（不会被误当成 HF 仓库去请求）
   - 模型下拉与设备下拉现在会按设置回显（此前打开弹窗永远显示第一项，动一下别的设置就会把 provider / 设备写回默认）
-  - 自定义仓库下载不再写死「约 1.2GB / CC-BY-NC-SA-4.0」：体积未知时只报磁盘剩余，许可证由用户自行确认；下载白名单补上 `pytorch_model.bin` 与 `tokenizer.model`（仓库同时提供 safetensors 时只下后者，避免双份权重）
-  - worker 侧补齐自定义模型的两处兜底：缺 `preprocessor_config.json` 时用 Wav2Vec2 默认特征参数重建 processor；`pad_token_id` 缺失时回落分词器 pad / 0，并在加载后拒绝没有 CTC 头的基座模型
+  - 自定义仓库下载不再写死「约 1.2GB / CC-BY-NC-SA-4.0」：体积未知时只报磁盘剩余，许可证由用户自行确认；下载完成后按兼容性检查结果提示（不兼容时明确说「已下载但无法使用」而不是「已就绪」）
+  - 下载白名单补上 `pytorch_model.bin` / 分片 bin / `tokenizer.model`，并收窄到权重文件名（`training_args.bin` 等训练产物不下载）；仓库同时提供 safetensors 时只下后者，但存在 `pytorch_model.bin.index.json` 时保留 bin 分片
+  - 模型扫描避开网络共享：`模型目录` 指向 UNC/网络驱动器时打开弹窗不自动扫描（避免 UI 冻结），改由用户点「刷新」
+  - worker 侧补齐自定义模型的兜底与硬校验：缺 `preprocessor_config.json` 时用 Wav2Vec2 默认特征参数重建 processor（配置存在时不再静默回退）；缺 CTC 头权重（`lm_head.*`）或 `pad_token_id`/分词器 pad 均缺失时直接中文报错；CTC blank 越界或出现在待对齐文本中会明确拒绝，不再猜测 0
 
 ### 嵌入契约
 - 新增 `MainWindow.import_ttml_from_text(content, switch_to_editor=True, force=False)` 与 `import_ttml_from_file(path, ...)`：宿主可把 AMLL TTML 文本或本地 `.ttml` 文件直接交给 SUG；先同步校验 XML/根元素，再走既有异步导入。默认保护当前项目的未保存歌词，`force=True` 才允许替换
@@ -42,7 +46,9 @@
 - 新增导出页 TTML 轴分组拆分、副轴行同组合并/不同组独立导出测试；新增 `.sug` 副轴 Sentence/角色 Singer/agent 来源持久化测试
 - 新增 songPart 回环、源时间风格检测/回写、丢弃内容识别与 `ttml_import_warnings` 信号测试
 - 新增 `tests/unit/frontend/test_ttml_import.py`、`tests/unit/test_ttml_embedded_handoff.py`；样本来源见 `tests/fixtures/ttml/README.md`
-- 新增 `tests/unit/application/test_ai_timing_local_models.py`：本地模型目录校验（架构 / 权重 / 分词器 / 词表 / Git LFS 指针）、模型目录扫描（多套一层与文件摊在根目录）、`filter_model_files` 的 `.bin` 去重，以及服务侧「本地目录 → worker model_id / 对齐缓存键 / 失败阻断」接线
+- 新增 `tests/unit/application/test_ai_timing_local_models.py`：本地模型目录校验（架构 / 权重 / 分词器 / 词表 / Git LFS 指针）、模型目录扫描（多套一层与文件摊在根目录）、`filter_model_files` 的 `.bin` 去重，以及服务侧「本地目录 → worker model_id / 对齐缓存键（含换权重后失效）/ 失败阻断 / URL 输入」接线
+- 新增 `tests/unit/application/test_ai_timing_provider_guards.py`：用假 transformers/torch 覆盖 worker 的三道守卫（架构、缺 CTC 头权重、CTC blank 回退与越界）与 processor 兜底边界
+- 弹窗新增 10 个用例：自定义模型回显、模型目录扫描、选择持久化（相对路径）、手输路径规范化、切回默认清空、本地模型隐藏下载、本地模型拦截下载、未填内容阻断执行，以及两条**使用真实 `AiTimingService`** 的弹窗/服务契约用例
 
 ### 已知边界
 - 翻译/音译/和声现在是独立歌词行 + 角色 Singer，可在编辑器和轴分组里看到；尚未提供“只显示主行”的折叠视图
