@@ -237,6 +237,10 @@ class AppSettings:
             "delete_ruby_types": [],
             "delete_checkpoint_types": [],
         },
+        "import": {
+            # TTML 导入时“无法在 SUG 中修改、导出会丢弃”的提示；勾选不再提示后置真。
+            "ttml_dropped_features_suppressed": False,
+        },
         "ui": {
             "theme": "auto",
             "language": "auto",

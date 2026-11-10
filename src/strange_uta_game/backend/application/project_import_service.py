@@ -85,6 +85,8 @@ class ProjectImportService:
                 # 落到 default_singer_id。需要保留多演唱者时用 TTMLParser + 前端导入。
                 from strange_uta_game.backend.infrastructure.parsers.ttml_parser import (
                     TTMLParser,
+                    build_aux_singer_specs,
+                    build_ttml_sentences,
                 )
 
                 document = TTMLParser().parse_document(content)
@@ -93,10 +95,14 @@ class ProjectImportService:
                     for agent in document.agents.values()
                     if agent.name
                 }
-                return parse_to_sentences(
-                    document.lines,
+                aux_specs, aux_name_by_key = build_aux_singer_specs(document)
+                for name, _role in aux_specs:
+                    name_to_id.setdefault(name, default_singer_id)
+                return build_ttml_sentences(
+                    document,
                     default_singer_id,
-                    singer_name_to_id=name_to_id,
+                    name_to_id,
+                    aux_name_by_key=aux_name_by_key,
                 )
             if _INLINE_PATTERN.search(content):
                 return sentences_from_inline_text(content, default_singer_id)
@@ -168,6 +174,8 @@ class ProjectImportService:
             if suffix == ".ttml":
                 from strange_uta_game.backend.infrastructure.parsers.ttml_parser import (
                     TTMLParser,
+                    build_aux_singer_specs,
+                    build_ttml_sentences,
                 )
 
                 parser = TTMLParser()
@@ -177,10 +185,14 @@ class ProjectImportService:
                     for agent in document.agents.values()
                     if agent.name
                 }
-                sentences = parse_to_sentences(
-                    document.lines,
+                aux_specs, aux_name_by_key = build_aux_singer_specs(document)
+                for name, _role in aux_specs:
+                    name_to_id.setdefault(name, default_singer_id)
+                sentences = build_ttml_sentences(
+                    document,
                     default_singer_id,
-                    singer_name_to_id=name_to_id,
+                    name_to_id,
+                    aux_name_by_key=aux_name_by_key,
                 )
                 return sentences, parser.parse_metadata()
             if suffix == ".ass":

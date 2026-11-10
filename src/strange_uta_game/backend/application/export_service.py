@@ -129,7 +129,8 @@ class ExportService:
             file_path: 导出文件路径
             offset_ms: 已弃用。全局偏移由前端通过 Character.set_offset() 预先写入
                        global_timestamps，本参数保留只为向后兼容，不会被使用。
-            singer_ids: 要输出的演唱者 ID 集合（None=全部，仅 Nicokara/Kirakara 有效）
+            singer_ids: 要输出的演唱者/角色 ID 集合（None=全部，仅
+                       Nicokara/Kirakara/TTML 有效）
             insert_singer_tags: 是否在演唱者切换处插入【演唱者名】标签
             insert_singer_each_line: 是否在每行行首插入演唱者名称标签
             singer_map: singer_id → 演唱者显示名的映射
@@ -180,10 +181,30 @@ class ExportService:
             from strange_uta_game.backend.infrastructure.exporters.kasugamuki_romaji_exporter import (
                 KirakaraExporter,
             )
+            from strange_uta_game.backend.infrastructure.exporters.ttml_exporter import (
+                TTMLExporter,
+            )
+
+            # 翻译/音译/和声是 TTML 专用副轴行；LRC/ASS/Nicokara 等格式
+            # 不应把它们当普通歌词输出。轴分组过滤不能兜住“未分组”导出，
+            # 因此在这里统一剔除。
+            export_project = project
+            if not isinstance(exporter, TTMLExporter) and any(
+                getattr(sentence, "aux_role", "")
+                for sentence in project.sentences
+            ):
+                import copy
+
+                export_project = copy.copy(project)
+                export_project.sentences = [
+                    sentence
+                    for sentence in project.sentences
+                    if not getattr(sentence, "aux_role", "")
+                ]
 
             if isinstance(exporter, KirakaraExporter):
                 exporter.export(
-                    project,
+                    export_project,
                     file_path,
                     singer_ids=singer_ids,
                     insert_singer_tags=insert_singer_tags,
@@ -194,7 +215,7 @@ class ExportService:
                 )
             elif isinstance(exporter, NicokaraWithRubyExporter):
                 exporter.export(
-                    project,
+                    export_project,
                     file_path,
                     singer_ids=singer_ids,
                     insert_singer_tags=insert_singer_tags,
@@ -204,15 +225,23 @@ class ExportService:
                 )
             elif isinstance(exporter, NicokaraExporter):
                 exporter.export(
-                    project,
+                    export_project,
                     file_path,
                     singer_ids=singer_ids,
                     insert_singer_tags=insert_singer_tags,
                     insert_singer_each_line=insert_singer_each_line,
                     singer_map=singer_map,
                 )
+            elif isinstance(exporter, TTMLExporter):
+                # 轴分组导出：副轴行由所属 Singer 是否在组内决定去留。
+                exporter.export(
+                    export_project,
+                    file_path,
+                    singer_ids=singer_ids,
+                    compensation_ms=software_compensation_ms,
+                )
             else:
-                exporter.export(project, file_path)
+                exporter.export(export_project, file_path)
 
             # 报告完成
             if self._progress_callback:
@@ -288,6 +317,8 @@ class ExportService:
         """
         untimed = []
         for i, s in enumerate(project.sentences):
+            if getattr(s, "aux_role", ""):
+                continue
             if any(c.total_timing_points > 0 for c in s.characters) and not s.is_fully_timed():
                 untimed.append(f"第{i + 1}行「{s.text}」")
 

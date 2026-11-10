@@ -84,6 +84,21 @@ class Singer:
     display_priority: int = 0
     enabled: bool = True
     group: str = ""
+    # ── TTML 来源 agent（仅从 TTML 导入时填写；其他格式保持空） ──
+    # 保存源文件的 xml:id / type / 是否有 ttm:name，供导出时原样回写。
+    # ``ttml_agent_named`` 仅在源 agent 存在且原本有名字时为 True；无名
+    # agent 被用户重命名后由 rename() 置为 True，导出才会真正写入名字。
+    ttml_agent_id: str = ""
+    ttml_agent_type: str = ""
+    ttml_agent_named: bool = True
+    # 导入时使用的展示名（同名 agent 会加 id 后缀）与源 ttm:name 原文。
+    # 导出时只有用户改过展示名才写 Singer.name，否则回写 source_name。
+    ttml_agent_display_name: str = ""
+    ttml_agent_source_name: str = ""
+    # 辅助角色演唱者（翻译/音译/和声等）：非空表示该 Singer 是导入 TTML
+    # 辅助轨时自动建立的角色，不参与普通 agent 表；导出时由所属 Sentence
+    # 的 aux_role 决定写 x-* span。
+    ttml_role: str = ""
 
     def __post_init__(self) -> None:
         if not self.id:
@@ -120,6 +135,19 @@ class Singer:
             raise ValidationError("演唱者名称不能为空")
         self.name = new_name
         self.is_placeholder = False
+        # 来自 TTML 的无名 agent：一旦用户重命名，导出时就应写入这个新名字；
+        # 否则仍保留源文件的“无 ttm:name”状态，避免 round-trip 凭空多出名字。
+        if self.ttml_agent_id and not self.ttml_agent_named:
+            self.ttml_agent_named = True
+
+    def adopt_ttml_agent(self, other: "Singer") -> None:
+        """复制另一个演唱者的 TTML agent 来源信息（导入合并时用）。"""
+        self.ttml_agent_id = other.ttml_agent_id
+        self.ttml_agent_type = other.ttml_agent_type
+        self.ttml_agent_named = other.ttml_agent_named
+        self.ttml_agent_display_name = other.ttml_agent_display_name
+        self.ttml_agent_source_name = other.ttml_agent_source_name
+        self.ttml_role = other.ttml_role
 
     def change_color(
         self,
@@ -216,6 +244,68 @@ class AxisGroup:
 
 
 @dataclass
+class AuxTrack:
+    """TTML 解析期的一棵辅助轨树（导入后转成独立 Sentence）。
+
+    SUG 的最终数据模型里，翻译、音译、和声是独立的 ``Sentence`` 行并分配
+    角色 Singer；:class:`AuxTrack` 只作为解析中间结构，保留源 span 的
+    文本、role、语言、时间与嵌套子 span，供 ``build_ttml_sentences`` 转换。
+
+    * 翻译 / 音译通常是叶子节点：``role="x-translation"`` / ``"x-roman"``；
+    * 背景人声可以是叶子或带逐词子 span 的容器：``role="x-bg"``；
+    * 未知 ``x-*`` role 同样保留，不静默丢弃。
+
+    :attr:`text` 只保存该元素自身的直接文本；子节点在 :attr:`children`。
+    用 :attr:`plain_text` 取包含所有子节点的完整文本。
+
+    Attributes:
+        role: 源 ``ttm:role`` 属性（如 ``"x-translation"``；空 = 结构子 span）
+        text: 元素直接文本
+        lang: ``xml:lang``（翻译常见 ``zh-CN``）
+        begin: 元素开始时间（毫秒，可空）
+        end: 元素结束时间（毫秒，可空）
+        agent: 源 ``ttm:agent`` 的 xml:id（可空）
+        children: 子 span 的辅助轨节点（背景人声逐词时间轴）
+    """
+
+    role: str = ""
+    text: str = ""
+    lang: str = ""
+    begin: Optional[int] = None
+    end: Optional[int] = None
+    agent: str = ""
+    children: List["AuxTrack"] = field(default_factory=list)
+
+    @property
+    def roles(self) -> tuple:
+        """拆开 ``role`` 属性中的多个 role token。"""
+        return tuple(part for part in str(self.role or "").split() if part)
+
+    def has_role(self, role: str) -> bool:
+        """是否包含指定 role token。"""
+        return role in self.roles
+
+    @property
+    def plain_text(self) -> str:
+        """包含全部子节点的完整文本（叶子节点即 :attr:`text`）。"""
+        if not self.children:
+            return self.text
+        return self.text + "".join(child.plain_text for child in self.children)
+
+    @property
+    def is_translation(self) -> bool:
+        return self.has_role("x-translation")
+
+    @property
+    def is_romanization(self) -> bool:
+        return self.has_role("x-roman")
+
+    @property
+    def is_background(self) -> bool:
+        return self.has_role("x-bg")
+
+
+@dataclass
 class Sentence:
     """句子 — 一行歌词
 
@@ -242,6 +332,18 @@ class Sentence:
     singer_id: str
     id: str = field(default_factory=lambda: str(uuid4()))
     characters: List[Character] = field(default_factory=list)
+    # ── TTML 辅助角色行（翻译 / 音译 / 背景人声） ──
+    # 这些内容不再挂在主行上，而是变成独立的 Sentence，由 Singer/轴分组
+    # 管理；下列字段只在该 Sentence 是辅助角色行时非空。
+    aux_role: str = ""
+    aux_parent_id: str = ""
+    aux_lang: str = ""
+    aux_agent: str = ""
+    aux_order: int = 0
+    aux_begin: Optional[int] = None
+    aux_end: Optional[int] = None
+    # AMLL/Apple Music 段落（Verse / Chorus / ...）；空 = 未标注。
+    song_part: str = ""
 
     def __post_init__(self) -> None:
         if not self.id:
@@ -255,6 +357,28 @@ class Sentence:
     def text(self) -> str:
         """歌词文本"""
         return "".join(c.char for c in self.characters)
+
+    # ── 辅助角色行便捷访问 ──
+
+    @property
+    def is_auxiliary(self) -> bool:
+        """该行是否来自 TTML 辅助角色（翻译/音译/和声等）。"""
+        return bool(self.aux_role)
+
+    @property
+    def translation(self) -> str:
+        """辅助角色为翻译时返回文本，否则空串。"""
+        return self.text if "x-translation" in self.aux_role.split() else ""
+
+    @property
+    def romanization(self) -> str:
+        """辅助角色为音译时返回文本，否则空串。"""
+        return self.text if "x-roman" in self.aux_role.split() else ""
+
+    @property
+    def background(self) -> str:
+        """辅助角色为背景人声时返回文本，否则空串。"""
+        return self.text if "x-bg" in self.aux_role.split() else ""
 
     @property
     def chars(self) -> List[str]:
@@ -438,12 +562,61 @@ class Sentence:
             moved_singer_id = moved_chars[0].singer_id or split_char.singer_id or self.singer_id
             if not any(ch.is_line_end for ch in moved_chars):
                 moved_chars[-1].is_line_end = True
-            return Sentence(singer_id=moved_singer_id, characters=moved_chars)
+            return Sentence(
+                singer_id=moved_singer_id,
+                characters=moved_chars,
+                song_part=self.song_part,
+                aux_role=self.aux_role,
+                aux_parent_id=self.aux_parent_id,
+                aux_lang=self.aux_lang,
+                aux_agent=self.aux_agent,
+                aux_order=self.aux_order,
+                aux_begin=self.aux_begin,
+                aux_end=self.aux_end,
+            )
 
         moved_singer_id = split_char.singer_id or self.singer_id
-        return Sentence(singer_id=moved_singer_id, characters=[])
+        return Sentence(
+            singer_id=moved_singer_id,
+            characters=[],
+            song_part=self.song_part,
+            aux_role=self.aux_role,
+            aux_parent_id=self.aux_parent_id,
+            aux_lang=self.aux_lang,
+            aux_agent=self.aux_agent,
+            aux_order=self.aux_order,
+            aux_begin=self.aux_begin,
+            aux_end=self.aux_end,
+        )
 
     # ── 时间戳管理 ──
+
+    def shift_times(self, delta_ms: int) -> None:
+        """整体平移本行时间（含副轴容器），并刷新 global/ruby。"""
+        delta_ms = int(delta_ms)
+        for char in self.characters:
+            if char.timestamps:
+                char.timestamps = [
+                    max(0, int(timestamp) + delta_ms)
+                    for timestamp in char.timestamps
+                ]
+            if char.sentence_end_ts is not None:
+                char.set_sentence_end_ts(
+                    max(0, int(char.sentence_end_ts) + delta_ms)
+                )
+            char._update_offset_timestamps()
+            char.push_to_ruby()
+        if self.aux_begin is not None:
+            self.aux_begin = max(0, int(self.aux_begin) + delta_ms)
+        if self.aux_end is not None:
+            self.aux_end = max(0, int(self.aux_end) + delta_ms)
+
+    def clear_times(self) -> None:
+        """清空本行时间（含副轴容器）。"""
+        for char in self.characters:
+            char.clear_timestamps()
+        self.aux_begin = None
+        self.aux_end = None
 
     def push_all_timestamps(self) -> None:
         """将所有字符的时间戳推送给各自的 Ruby"""
@@ -472,7 +645,7 @@ class Sentence:
         """清空所有字符的时间戳"""
         for char in self.characters:
             char.clear_timestamps()
-    
+
     def clear_one_timestamps(self, char_idx: int) -> None:
         """清空一个字符的时间戳"""
         self.characters[char_idx].clear_timestamps()

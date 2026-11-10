@@ -149,8 +149,8 @@
   <td align="center">🤖</td>
   <td>
     <b>AI 打轴（Beta） / AI-assisted timing (Beta)</b><br/>
-    <sub>在 <b>打轴界面 → AI 打轴</b> 中，根据人声音频、歌词与已有注音自动生成整首歌曲的时间戳；支持日文及歌词中的中文、英文、韩文内容，可自动复用或分离人声，并提供日文推荐模型与多语言通用模型。默认日文推荐模型仅限非商业用途。结果仅供辅助参考，完成后请人工校准，尤其是和声与重叠人声段落。<br/>
-    Generate full-song timestamps from vocals, lyrics and existing readings under <b>Timing → AI Timing</b>. Japanese, Chinese, English and Korean content are supported, with reusable/automatic vocal separation and both Japanese-focused and multilingual models. The default Japanese-focused model is non-commercial only. Always review the result manually, especially harmony and overlapping-vocal sections.</sub>
+    <sub>在 <b>打轴界面 → AI 打轴</b> 中，根据人声音频、歌词与已有注音自动生成整首歌曲的时间戳；支持日文及歌词中的中文、英文、韩文内容，可自动复用或分离人声，并提供日文推荐模型与多语言通用模型。默认日文推荐模型仅限非商业用途。也可选「自定义模型」：填 Hugging Face 仓库 ID，或把模型文件夹直接放进「模型目录」后一键选择（仅支持 Wav2Vec2 家族 + 罗马字词表）。结果仅供辅助参考，完成后请人工校准，尤其是和声与重叠人声段落。<br/>
+    Generate full-song timestamps from vocals, lyrics and existing readings under <b>Timing → AI Timing</b>. Japanese, Chinese, English and Korean content are supported, with reusable/automatic vocal separation and both Japanese-focused and multilingual models. The default Japanese-focused model is non-commercial only. You can also pick a custom model by Hugging Face repo ID, or drop a model folder into the model directory and select it in the dialog (Wav2Vec2-family CTC models with a romanized vocabulary only). Always review the result manually, especially harmony and overlapping-vocal sections.</sub>
   </td>
 </tr>
 <tr>
@@ -296,6 +296,7 @@
 | 最近打开的项目 / Recent projects | **打轴界面 → 文件管理 → 最近打开的文件** | 最多显示 10 条记录，可在同一菜单中清空。 |
 | F2 注音快捷编辑 / Quick ruby editor | **设置 → 快捷键 → 字符与行编辑 → 注音编辑窗口** | 默认 <kbd>F2</kbd>；可选择迷你浮窗或经典大窗口。 |
 | Kirakara 导入与导出 / Kirakara import & export | 导入：**首页 → 导入歌词文件**或**打轴界面 → 文件管理 → 加载歌词**；导出：**导出 → 导出格式 → Kirakara** | 支持带 `config` 配置块的 KRL；默认导出格式可在 **设置 → 导出 → 默认导出格式** 中修改。 |
+| TTML / AMLL TTML 导入与导出 / TTML import & export | 导入：**首页 → 导入歌词文件**或**打轴界面 → 文件管理 → 加载歌词**；导出：**导出 → 导出格式 → TTML** | 支持逐词轴、ruby、`ttm:agent`、`itunes:song-part`；翻译/音译/和声会变成独立歌词行 + 角色 Singer，按轴分组决定是否合并回主行 `x-*` span。导入时会提示 SUG 无法修改、导出将丢弃的内容（可勾选“不再提示”）。 |
 
 <!-- ───────────────────────────── 安装 ───────────────────────────── -->
 

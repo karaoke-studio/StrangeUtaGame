@@ -5,11 +5,28 @@
 ### 新增功能
 - **TTML / AMLL TTML 交换格式（SUG 侧前置工作）**：新增 `.ttml` 歌词导入与导出。
   - 导入支持 AMLL TTML DB 的逐词 `<span begin/end>`、TTML2 ruby（`container` / `base` / `textContainer` / `text`）、`ttm:agent` 演唱者、`amll:meta` 曲名/艺人/专辑/语言；兼容 `begin+dur`、秒后缀 `15.8s`、`ttm:title`、空行/空句子与未命名 agent；LRC/TXT/KRA/ASS/SRT/Nicokara 等既有导入路径不变
+  - **songPart 支持**：读取 `itunes:songPart` / `itunes:song-part`，落到 `Sentence.song_part`，可在行详情里编辑；导出按连续段落分组成 `<div itunes:song-part="...">`
+  - **时间格式归一化**：导入记录源文件主导时间书写风格（分钟制 / 时分秒 / 秒 / 秒后缀、精度、是否补零），导出时按该风格回写；语义仍统一按毫秒对齐。用户在 SUG 里打了超出源精度的毫秒时间时自动回退完整 `HH:MM:SS.mmm`，并为低精度输出补足非零 `end`，避免零长度 span
+  - **全文本编辑保真**：应用全文本时按旧行文本/相似度匹配保留 `song_part`、副轴角色与父行关联；插入/重排不会把翻译角色套到错误行，改写副轴文本也不会退化成普通主行
+  - **非 TTML 导出隔离**：LRC / ASS / Nicokara 等导出自动剔除翻译/音译/和声副轴行，避免副轴被当主歌词输出
+  - **丢弃内容提示**：导入时发现 `tts` 样式、Apple Music 头部 sidecar 翻译/音译、布局/图片、`amll:obscene` 等 SUG 无法修改的内容，弹出提示并列出类别；勾选「不再提示」后持久化到 `import.ttml_dropped_features_suppressed`。嵌入式宿主新增 `ttml_import_warnings(list)` 信号，即使 SUG 用户关闭提示也会收到
+  - **辅助角色独立成行**：`x-translation` 翻译、`x-roman` 音译、`x-bg` 背景人声（含逐词子 span）以及未知 `x-*` role 会转成独立的 `Sentence` 行，并分配「翻译 (语言)」「音译」「和声」等角色 Singer；`aux_parent_id` 关联主行，时间戳允许与主行重叠/逆序
+  - **agent 回环保真**：保留源 `xml:id` / `type`（person/group/other）/ 是否原本带 `ttm:name`；未命名 agent 不再凭空写名字，同名 agent 用 id 后缀区分展示、导出仍回写源 `ttm:name`；用户重命名后导出新名字
+  - `amll:meta` 的多艺人/多专辑/多曲名源值按原顺序回写；用户改过固定字段则只写当前项目值
   - 新增 `TTML` 导出格式（AMLL TTML DB 风格，`itunes:timing="Word"`），保留逐字时间戳、ruby、演唱者、行尾释放、空行与 SUG 的 extra checkpoint / 句中停顿 / 连词 / 零节奏点 / 未打轴字符
+  - **按轴分组导出**：TTML 接入导出页轴分组，由组内 Singer 决定包含哪些主行/副轴行；副轴行与父行同组时合并回主行的 `x-translation` / `x-roman` / `x-bg` span，父行不在组内时副轴单独成行；不再提供独立的「TTML 辅助轨」勾选
   - 「加载歌词」文件框、拖拽与主页导入识别 `.ttml`；主页创建项目时会保留 TTML 演唱者与曲名/艺人/专辑/语言
   - 「加载歌词」遇到坏 `.ttml` 会先同步校验，不再先把当前项目换成空项目；剪贴板中的 TTML 不再被当普通字符插进当前行
   - 后端 `ProjectImportService` 增加 `.ttml` 分支（文本/时间/元数据；该 API 没有 Singer 列表，多演唱者请走前端导入）
   - 既有导出格式一个都不改：`TTML` 只追加在导出器注册表末尾
+
+- **AI 打轴支持自定义对齐模型**（AI 打轴窗口 → 高级选项 → 对齐模型 → 自定义模型）
+  - 可填 Hugging Face 仓库 ID 走受控下载（镜像、断点续传、完整性校验照旧），也可把已下载的模型文件夹**直接放进模型目录**，在弹窗「模型目录中已放入」列表中一键选择，无需经过下载流程；支持模型根下的文件夹、多套一层目录，以及文件直接摊在模型根里三种放法
+  - **仅支持 Wav2Vec2 家族**（`Wav2Vec2ForCTC` 架构 + 拉丁字母/罗马字词表）：对齐链路会把读音罗马化后送进 CTC，其它架构或假名/汉字词表不会报错，而是安静地产出错误时间轴——因此弹窗说明、下载与执行前预检共用同一句提示，本地目录在选中时即检查架构、权重（含 Git LFS 指针识别）、分词器与词表覆盖面，选错时给出可操作的中文原因；自定义仓库下载完成后也会跑同一次检查，不等 worker 跑到一半才失败
+  - 本地模型按「目录 + 权重 size/mtime」记入对齐缓存键：把新权重覆盖进同一个文件夹后不会命中旧时间轴
+  - 模型下拉与设备下拉现在会按设置回显（此前打开弹窗永远显示第一项，动一下别的设置就会把 provider / 设备写回默认）
+  - 自定义仓库下载不再写死「约 1.2GB / CC-BY-NC-SA-4.0」：体积未知时只报磁盘剩余，许可证由用户自行确认；下载白名单补上 `pytorch_model.bin` 与 `tokenizer.model`（仓库同时提供 safetensors 时只下后者，避免双份权重）
+  - worker 侧补齐自定义模型的两处兜底：缺 `preprocessor_config.json` 时用 Wav2Vec2 默认特征参数重建 processor；`pad_token_id` 缺失时回落分词器 pad / 0，并在加载后拒绝没有 CTC 头的基座模型
 
 ### 嵌入契约
 - 新增 `MainWindow.import_ttml_from_text(content, switch_to_editor=True, force=False)` 与 `import_ttml_from_file(path, ...)`：宿主可把 AMLL TTML 文本或本地 `.ttml` 文件直接交给 SUG；先同步校验 XML/根元素，再走既有异步导入。默认保护当前项目的未保存歌词，`force=True` 才允许替换
@@ -21,13 +38,20 @@
 
 ### 测试
 - 新增 `tests/unit/infrastructure/test_ttml_roundtrip.py`：自建 TTML 与真实 AMLL TTML DB 文件（`ncm-lyrics/101126.ttml`）的 export→import→export 模型签名回环
+- 新增 AMLL TTML DB 五个分区（ncm / qq / am / spotify / raw-lyrics）真实样本：翻译、音译、背景人声逐词时间轴、具名/未命名 agent、同名 person+group agent 的回环与稳定导出；样本来源见 `tests/fixtures/ttml/README.md`
+- 新增导出页 TTML 轴分组拆分、副轴行同组合并/不同组独立导出测试；新增 `.sug` 副轴 Sentence/角色 Singer/agent 来源持久化测试
+- 新增 songPart 回环、源时间风格检测/回写、丢弃内容识别与 `ttml_import_warnings` 信号测试
 - 新增 `tests/unit/frontend/test_ttml_import.py`、`tests/unit/test_ttml_embedded_handoff.py`；样本来源见 `tests/fixtures/ttml/README.md`
+- 新增 `tests/unit/application/test_ai_timing_local_models.py`：本地模型目录校验（架构 / 权重 / 分词器 / 词表 / Git LFS 指针）、模型目录扫描（多套一层与文件摊在根目录）、`filter_model_files` 的 `.bin` 去重，以及服务侧「本地目录 → worker model_id / 对齐缓存键 / 失败阻断」接线
 
 ### 已知边界
-- AMLL 的 `x-bg` 背景人声、`x-translation` 翻译、`x-roman` 音译暂不进入 SUG 主文本；导入时会记录 warning 并在导入完成/主页创建项目时提示，不静默混入正文
-- 样式/字体/图片与 songPart 分区不参与 SUG 数据模型，导出时不会保留；平台 ID / ISRC / 作者等进入 `ProjectMetadata.extra` 并保留
-- 多条 `amll:meta artists` 会合并为一条；多字 base + 多段 ruby 的极端写法只保留首字读音
-- 未命名 `ttm:agent` 会以「艺人名 (agentId)」占位并提示重命名；多值 `ttm:agent` 目前只取第一个
+- 翻译/音译/和声现在是独立歌词行 + 角色 Singer，可在编辑器和轴分组里看到；尚未提供“只显示主行”的折叠视图
+- `songPart` 支持按连续行分组导出；同一行内无法混排多个段落
+- 源时间风格按全文件多数派归一化；同一文件混用 `3:14.734` 与 `00:03:14.734` 时无法逐值保留原字符串
+- 样式/字体/图片不参与 SUG 数据模型，导出时不会保留；平台 ID / ISRC / 作者等进入 `ProjectMetadata.extra` 并保留
+- 多字 base + 多段 ruby 的极端写法只保留首字读音
+- 多值 `ttm:agent`（同一 `<p>` 引用多个演唱者）目前只使用第一个，并给出一次提示
+- 副轴行嵌套的非文本样式属性（如 `tts:ruby`、字体）不保证逐字节回写，但 role / 文本 / `xml:lang` / begin-end / 子 span 结构保留
 - 主页文本框仍显示原始 TTML 文本（解析在点击「创建项目」时进行），暂无 TTML 行数/歌词预览
 
 ## [1.7.4] - 2026-10-21

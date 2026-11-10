@@ -493,7 +493,7 @@ class HomeInterface(QWidget):
             warnings = self._ttml_meta.get("warnings")
             if warnings:
                 InfoBar.warning(
-                    title=self.tr("TTML 辅助轨已忽略"),
+                    title=self.tr("TTML 导入提示"),
                     content="\n".join(str(item) for item in warnings),
                     orient=Qt.Orientation.Horizontal,
                     isClosable=True,
@@ -501,6 +501,13 @@ class HomeInterface(QWidget):
                     duration=8000,
                     parent=self,
                 )
+            dropped_features = self._ttml_meta.get("dropped_features")
+            if dropped_features:
+                from strange_uta_game.frontend.editor.timing.ttml_notice import (
+                    show_ttml_dropped_features,
+                )
+
+                show_ttml_dropped_features(self, dropped_features)
 
             # 自动分析注音并生成节奏点（仅对无注音的行）
             try:
@@ -517,7 +524,11 @@ class HomeInterface(QWidget):
                         is_chinese_lyrics,
                         is_korean_lyrics,
                     )
-                    all_text = "".join(s.text for s in project.sentences)
+                    all_text = "".join(
+                        s.text
+                        for s in project.sentences
+                        if not getattr(s, "aux_role", "")
+                    )
                     chinese_mode = False
                     if auto_check_flags.get("chinese_lyrics_detection", True):
                         chinese_mode = is_chinese_lyrics(all_text)
@@ -580,8 +591,12 @@ class HomeInterface(QWidget):
                             )
                             _proceed = ensure_winrt_japanese(self)
                         if _proceed:
-                            # LLM 整首一次发送：传入全部行文本以保留上下文。
-                            lines = [s.text for s in project.sentences]
+                            # LLM 整首一次发送：只传主歌词行（副轴不参与注音）。
+                            lines = [
+                                s.text
+                                for s in project.sentences
+                                if not getattr(s, "aux_role", "")
+                            ]
                             analyzer = app_settings.build_ruby_analyzer(
                                 lines,
                                 annotate_katakana_with_english=annotate_katakana_with_english,
@@ -786,6 +801,7 @@ class HomeInterface(QWidget):
             reuse_placeholder
             and pending_singers
             and getattr(default_singer, "is_placeholder", False)
+            and not getattr(pending_singers[0], "ttml_role", "")
             and not any(
                 s.name == pending_singers[0].name for s in project.singers
             )
@@ -793,6 +809,7 @@ class HomeInterface(QWidget):
             first = pending_singers.pop(0)
             default_singer.rename(first.name)
             default_singer.change_color(first.color)
+            default_singer.adopt_ttml_agent(first)
             singer_map[first.id] = default_singer.id
 
         for imported in pending_singers:
@@ -800,12 +817,23 @@ class HomeInterface(QWidget):
                 (s for s in project.singers if s.name == imported.name), None
             )
             if existing is not None:
+                # 已有同名演唱者：保留用户数据，只补 TTML 来源信息。
+                if not existing.ttml_agent_id and imported.ttml_agent_id:
+                    existing.adopt_ttml_agent(imported)
+                if not existing.ttml_role and imported.ttml_role:
+                    existing.ttml_role = imported.ttml_role
                 singer_map[imported.id] = existing.id
             else:
                 singer = Singer(
                     name=imported.name,
                     color=imported.color,
                     is_default=False,
+                    ttml_agent_id=imported.ttml_agent_id,
+                    ttml_agent_type=imported.ttml_agent_type,
+                    ttml_agent_named=imported.ttml_agent_named,
+                    ttml_agent_display_name=imported.ttml_agent_display_name,
+                    ttml_agent_source_name=imported.ttml_agent_source_name,
+                    ttml_role=imported.ttml_role,
                 )
                 project.add_singer(singer)
                 singer_map[imported.id] = singer.id
@@ -884,6 +912,8 @@ class HomeInterface(QWidget):
         if fmt == "ttml":
             from strange_uta_game.backend.infrastructure.parsers.ttml_parser import (
                 TTMLParser,
+                build_aux_singer_specs,
+                build_ttml_sentences,
             )
 
             parser = TTMLParser()
@@ -893,18 +923,49 @@ class HomeInterface(QWidget):
                 "#FF6B6B", "#4ECDC4", "#45B7D1", "#FFA07A", "#98D8C8",
                 "#C9B1FF", "#F7DC6F", "#82E0AA", "#F1948A", "#85C1E9",
             ]
-            for idx, name in enumerate(
-                sorted({a.name for a in document.agents.values() if a.name})
-            ):
+            # 按 head/body 中第一次出现的顺序建 Singer，保留源 agent id/type/
+            # 是否命名；同名 agent 只建一个 Singer。
+            seen_names: set = set()
+            ordered_agents = []
+            for agent in document.agents.values():
+                if agent.name and agent.name not in seen_names:
+                    seen_names.add(agent.name)
+                    ordered_agents.append(agent)
+            for idx, agent in enumerate(ordered_agents):
                 singer = Singer(
-                    name=name, color=colors[idx % len(colors)], is_default=False
+                    name=agent.name,
+                    color=colors[idx % len(colors)],
+                    is_default=False,
+                    ttml_agent_id=agent.id,
+                    ttml_agent_type=agent.type,
+                    ttml_agent_named=agent.named,
+                    ttml_agent_display_name=agent.name,
+                    ttml_agent_source_name=agent.source_name,
+                )
+                self._ttml_singers.append(singer)
+                singer_name_to_id[agent.name] = singer.id
+
+            # 辅助角色（翻译/音译/和声）也建 Singer，成为可分组/分轴的副轴。
+            aux_specs, aux_name_by_key = build_aux_singer_specs(document)
+            for offset, (name, role) in enumerate(aux_specs):
+                if name in singer_name_to_id:
+                    continue
+                singer = Singer(
+                    name=name,
+                    color=colors[
+                        (len(ordered_agents) + offset) % len(colors)
+                    ],
+                    is_default=False,
+                    ttml_role=role,
                 )
                 self._ttml_singers.append(singer)
                 singer_name_to_id[name] = singer.id
-            self._lyric_lines = parse_to_sentences(
-                document.lines,
+
+            self._lyric_lines = build_ttml_sentences(
+                document,
                 temp_singer.id,
-                singer_name_to_id=singer_name_to_id,
+                singer_name_to_id,
+                aux_name_by_key=aux_name_by_key,
             )
             self._ttml_meta = parser.parse_metadata()
             if document.warnings:

@@ -448,21 +448,7 @@ class SugProjectParser:
             },
             "audio_duration_ms": project.audio_duration_ms,
             "singers": [
-                {
-                    "id": s.id,
-                    "name": s.name,
-                    "color": s.color,
-                    "complement_color": s.complement_color,
-                    "color_mode": s.color_mode,
-                    "split_colors": s.split_colors,
-                    "is_default": s.is_default,
-                    "is_placeholder": s.is_placeholder,
-                    "display_priority": s.display_priority,
-                    "enabled": s.enabled,
-                    "backend_number": s.backend_number,
-                    "group": s.group,
-                }
-                for s in project.singers
+                SugProjectParser._singer_to_dict(s) for s in project.singers
             ],
             "sentences": [],
         }
@@ -482,6 +468,38 @@ class SugProjectParser:
         if media_path:
             result["media_path"] = media_path
         return result
+
+    @staticmethod
+    def _singer_to_dict(singer: Singer) -> Dict[str, Any]:
+        """把 Singer 序列化为存档字典。
+
+        TTML agent 来源信息只在非空时写入，旧版 .sug 不因此改变结构。
+        """
+        data: Dict[str, Any] = {
+            "id": singer.id,
+            "name": singer.name,
+            "color": singer.color,
+            "complement_color": singer.complement_color,
+            "color_mode": singer.color_mode,
+            "split_colors": singer.split_colors,
+            "is_default": singer.is_default,
+            "is_placeholder": singer.is_placeholder,
+            "display_priority": singer.display_priority,
+            "enabled": singer.enabled,
+            "backend_number": singer.backend_number,
+            "group": singer.group,
+        }
+        if singer.ttml_agent_id:
+            data["ttml_agent_id"] = singer.ttml_agent_id
+            data["ttml_agent_type"] = singer.ttml_agent_type
+            data["ttml_agent_named"] = bool(singer.ttml_agent_named)
+            if singer.ttml_agent_display_name:
+                data["ttml_agent_display_name"] = singer.ttml_agent_display_name
+            if singer.ttml_agent_source_name:
+                data["ttml_agent_source_name"] = singer.ttml_agent_source_name
+        if singer.ttml_role:
+            data["ttml_role"] = singer.ttml_role
+        return data
 
     @staticmethod
     def _sentence_to_dict(
@@ -526,11 +544,27 @@ class SugProjectParser:
                 }
             characters.append(char_dict)
 
-        return {
+        data: Dict[str, Any] = {
             "id": sentence.id,
             "singer_id": sentence.singer_id,
             "characters": characters,
         }
+        if sentence.aux_role:
+            data["aux_role"] = sentence.aux_role
+            if sentence.aux_parent_id:
+                data["aux_parent_id"] = sentence.aux_parent_id
+            if sentence.aux_lang:
+                data["aux_lang"] = sentence.aux_lang
+            if sentence.aux_agent:
+                data["aux_agent"] = sentence.aux_agent
+            data["aux_order"] = int(sentence.aux_order)
+            if sentence.aux_begin is not None:
+                data["aux_begin"] = int(sentence.aux_begin)
+            if sentence.aux_end is not None:
+                data["aux_end"] = int(sentence.aux_end)
+        if sentence.song_part:
+            data["song_part"] = sentence.song_part
+        return data
 
     # ==================== 反序列化 (Dict → Project) ====================
 
@@ -575,6 +609,18 @@ class SugProjectParser:
                 enabled=singer_data.get("enabled", True),
                 backend_number=int(singer_data.get("backend_number", 0)),
                 group=singer_data.get("group", ""),
+                ttml_agent_id=str(singer_data.get("ttml_agent_id", "") or ""),
+                ttml_agent_type=str(singer_data.get("ttml_agent_type", "") or ""),
+                ttml_agent_named=bool(
+                    singer_data.get("ttml_agent_named", True)
+                ),
+                ttml_agent_display_name=str(
+                    singer_data.get("ttml_agent_display_name", "") or ""
+                ),
+                ttml_agent_source_name=str(
+                    singer_data.get("ttml_agent_source_name", "") or ""
+                ),
+                ttml_role=str(singer_data.get("ttml_role", "") or ""),
             )
             singers.append(singer)
 
@@ -711,6 +757,20 @@ class SugProjectParser:
             id=data.get("id") or str(uuid4()),
             singer_id=effective_singer_id,
             characters=characters,
+            aux_role=str(data.get("aux_role", "") or ""),
+            aux_parent_id=str(data.get("aux_parent_id", "") or ""),
+            aux_lang=str(data.get("aux_lang", "") or ""),
+            aux_agent=str(data.get("aux_agent", "") or ""),
+            aux_order=int(data.get("aux_order", 0) or 0),
+            aux_begin=(
+                int(data["aux_begin"])
+                if data.get("aux_begin") is not None
+                else None
+            ),
+            aux_end=(
+                int(data["aux_end"]) if data.get("aux_end") is not None else None
+            ),
+            song_part=str(data.get("song_part", "") or ""),
         )
 
         return sentence

@@ -1023,10 +1023,16 @@ class FileLoader:
             parent=self._editor,
         )
 
+        # 先通知宿主“导入已完成”，再做提示弹窗/注音交互；否则宿主的
+        # ttml_import_finished 会被 SUG 自己的模态提示挡住。
+        self._notify_ttml_import_finished(
+            True, self._editor.tr("已加载 {n} 行歌词").format(n=len(sentences))
+        )
+
         warnings = (parse_meta or {}).get("warnings")
         if warnings:
             InfoBar.warning(
-                title=self._editor.tr("TTML 辅助轨已忽略"),
+                title=self._editor.tr("TTML 导入提示"),
                 content="\n".join(str(item) for item in warnings),
                 orient=Qt.Orientation.Horizontal,
                 isClosable=True,
@@ -1035,11 +1041,17 @@ class FileLoader:
                 parent=self._editor,
             )
 
-        # 自带注音格式弹窗；其余格式自动跑一轮保持原有注音的注音分析
+        dropped_features = (parse_meta or {}).get("dropped_features")
+
+        # 自带注音格式弹窗；其余格式自动跑一轮保持原有注音的注音分析。
+        # 丢弃内容提示先发/先弹，避免被注音三选一模态窗挡住宿主信号。
+        if dropped_features:
+            from strange_uta_game.frontend.editor.timing.ttml_notice import (
+                show_ttml_dropped_features,
+            )
+
+            show_ttml_dropped_features(self._editor, dropped_features)
         self._post_import_ruby_handling(is_nicokara, parse_meta)
-        self._notify_ttml_import_finished(
-            True, self._editor.tr("已加载 {n} 行歌词").format(n=len(sentences))
-        )
 
     def can_load_from_clipboard(self) -> bool:
         """判断是否可以从剪贴板加载歌词。

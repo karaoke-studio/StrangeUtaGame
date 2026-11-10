@@ -89,6 +89,9 @@ class PronunciationResolver:
             chinese_mode=self._effective_chinese_mode(project),
         )
         for line_idx, sentence in enumerate(project.sentences):
+            if getattr(sentence, "aux_role", ""):
+                # 翻译/音译/和声不参与主唱 AI 对齐。
+                continue
             for char_idx, ch in enumerate(sentence.characters):
                 script = script_kind_of(ch.char)
                 parts = ch.ruby.parts if ch.ruby else []
@@ -134,6 +137,8 @@ class PronunciationResolver:
         chinese = self._effective_chinese_mode(project)
         korean = self._effective_korean_mode(project)
         for line_idx, sentence in enumerate(project.sentences):
+            if getattr(sentence, "aux_role", ""):
+                continue
             gap_char_idxs = self._gap_chars_for_line(plan, line_idx, sentence)
             if not gap_char_idxs:
                 continue
@@ -146,10 +151,10 @@ class PronunciationResolver:
             self._apply_generated(plan, line_idx, sentence, readings)
 
     def _effective_chinese_mode(self, project: Project) -> bool:
-        """解析生效的中文模式：显式指定优先，否则按整工程文本自动检测。"""
+        """解析生效的中文模式：显式指定优先，否则按主歌词文本自动检测。"""
         if self._chinese_mode is not None:
             return self._chinese_mode
-        return is_chinese_lyrics("".join(s.text for s in project.sentences))
+        return is_chinese_lyrics(self._main_text(project))
 
     def _effective_korean_mode(self, project: Project) -> bool:
         """解析生效的韩文模式：显式指定优先，否则自动检测（无假名+含谚文）。
@@ -160,11 +165,20 @@ class PronunciationResolver:
         """
         if self._korean_mode is not None:
             return self._korean_mode
-        text = "".join(s.text for s in project.sentences)
+        text = self._main_text(project)
         if is_chinese_lyrics(text):
             # 无假名：含谚文即韩文（否则纯中文，走拼音）
             return any("\uac00" <= c <= "\ud7a3" for c in text)
         return False
+
+    @staticmethod
+    def _main_text(project: Project) -> str:
+        """主歌词文本；翻译/音译/和声等副轴行不参与语言检测。"""
+        return "".join(
+            s.text
+            for s in project.sentences
+            if not getattr(s, "aux_role", "")
+        )
 
     # ── 既有标注收集 ──
 

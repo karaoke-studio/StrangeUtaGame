@@ -375,6 +375,9 @@ class ExportInterface(QWidget):
         self._btn_emoji_config.clicked.connect(self._on_emoji_config)
         self._btn_emoji_config.hide()
 
+        # TTML 的翻译/音译/和声已作为辅助角色 Singer 进入轴分组，不再提供
+        # 单独的“TTML 辅助轨”勾选。
+
         self._singer_group.hide()
         self._settings_layout.addWidget(self._singer_group)
         self._settings_layout.addWidget(self._chk_insert_singer_tags)
@@ -556,12 +559,17 @@ class ExportInterface(QWidget):
             name = current.data(Qt.ItemDataRole.UserRole)
             is_nicokara = "nicokara" in name.lower()
             is_kirakara = name.lower() == "kirakara"
-            has_singer_options = is_nicokara or is_kirakara
+            is_ttml = name.lower() == "ttml"
+            # TTML 也支持按轴分组导出（每个演唱者一个 .ttml）；但不支持
+            # Nicokara 的【演唱者名】行内标签与 @Emoji 配置。
+            has_singer_options = is_nicokara or is_kirakara or is_ttml
             self.btn_tags.setVisible(is_nicokara)
             self._romaji_option_row.setVisible(is_kirakara)
             self._singer_group.setVisible(has_singer_options)
-            self._chk_insert_singer_tags.setVisible(has_singer_options)
-            self._chk_insert_singer_each_line.setVisible(has_singer_options)
+            self._chk_insert_singer_tags.setVisible(is_nicokara or is_kirakara)
+            self._chk_insert_singer_each_line.setVisible(
+                is_nicokara or is_kirakara
+            )
             self._btn_emoji_config.setVisible(is_nicokara)
             if is_kirakara:
                 self._chk_insert_singer_tags.setText(
@@ -1272,12 +1280,14 @@ class ExportInterface(QWidget):
         if base_name != requested_base_name:
             self.line_filename.setText(base_name)
 
-        # 轴分组拆分导出：仅对支持演唱者过滤的格式（Nicokara / Kirakara）
-        # 生效。存在 1 个以上分组时按组导出多个文件，文件名追加「_分组名」；
-        # 单个分组 = 按该组过滤的正常导出（不加后缀）。
+        # 轴分组拆分导出：对支持演唱者过滤的格式（Nicokara / Kirakara /
+        # TTML）生效。存在 1 个以上分组时按组导出多个文件，文件名追加
+        # 「_分组名」；单个分组 = 按该组过滤的正常导出（不加后缀）。
         name_lower = name.lower()
         has_singer_options = (
-            "nicokara" in name_lower or name_lower == "kirakara"
+            "nicokara" in name_lower
+            or name_lower == "kirakara"
+            or name_lower == "ttml"
         )
         axis_groups = (
             list(getattr(self._project, "axis_groups", None) or [])

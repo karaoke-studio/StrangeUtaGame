@@ -20,6 +20,9 @@ from strange_uta_game.backend.domain import (
     Character,
     AxisGroup,
 )
+from strange_uta_game.backend.infrastructure.parsers.ttml_parser import (
+    TTMLParser,
+)
 from strange_uta_game.frontend.export.export_interface import ExportInterface
 from strange_uta_game.frontend.settings.settings_interface import AppSettings
 
@@ -350,3 +353,89 @@ class TestAxisGroupStandaloneExport:
         settings.save()
         data = page._build_axis_tag_data(group, is_primary=False)
         assert data["custom"] == ["@Emoji=A,透明画像1x1.png,,Zoom=1"]
+
+
+def _select_format(page, name: str) -> None:
+    for i in range(page.format_list.count()):
+        item = page.format_list.item(i)
+        if item.data(Qt.ItemDataRole.UserRole) == name:
+            page.format_list.setCurrentRow(i)
+            return
+    pytest.fail(f"找不到格式 {name}")
+
+
+class TestTtmlAxisGroupExport:
+    def test_ttml_multi_group_export_splits_files(self, qapp, tmp_path):
+        page, project, (a, b) = _make_page(qapp, tmp_path)
+        _select_format(page, "TTML")
+        project.set_axis_groups(
+            [
+                AxisGroup(name="轴1", singer_ids=[a]),
+                AxisGroup(name="轴2", singer_ids=[b]),
+            ]
+        )
+
+        page._on_export()
+        _drain_export(page, qapp)
+
+        f1 = tmp_path / "song_轴1.ttml"
+        f2 = tmp_path / "song_轴2.ttml"
+        assert f1.is_file() and f2.is_file()
+        doc1 = TTMLParser().parse_document(f1.read_text(encoding="utf-8"))
+        doc2 = TTMLParser().parse_document(f2.read_text(encoding="utf-8"))
+        assert "".join(line.text for line in doc1.lines) == "あいう"
+        assert "".join(line.text for line in doc2.lines) == "えお"
+        assert {agent.name for agent in doc1.agents.values()} == {"A"}
+        assert {agent.name for agent in doc2.agents.values()} == {"B"}
+
+    def test_ttml_axis_groups_decide_aux_merge(
+        self, qapp, tmp_path, monkeypatch
+    ):
+        import strange_uta_game.frontend.export.export_interface as ei_mod
+
+        # 三次导出写同一目标文件；覆盖确认统一返回 True，避免模态框挂住。
+        monkeypatch.setattr(
+            ei_mod, "message_question", lambda *args, **kwargs: True
+        )
+        page, project, (a, _b) = _make_page(qapp, tmp_path)
+        _select_format(page, "TTML")
+        translator = Singer(
+            name="翻译", color="#45B7D1", ttml_role="x-translation"
+        )
+        project.add_singer(translator)
+        parent = project.sentences[0]
+        parent.song_part = "Verse"
+        aux = Sentence.from_text("翻译", translator.id)
+        aux.aux_role = "x-translation"
+        aux.aux_parent_id = parent.id
+        aux.aux_lang = "zh-CN"
+        project.sentences.insert(1, aux)
+
+        # 轴分组只含主唱：副轴不进入文件。
+        project.set_axis_groups([AxisGroup(name="主唱", singer_ids=[a])])
+        page._on_export()
+        _drain_export(page, qapp)
+        text = (tmp_path / "song.ttml").read_text(encoding="utf-8")
+        assert 'ttm:role="x-translation"' not in text
+        assert "翻译" not in text
+        assert 'song-part="Verse"' in text
+
+        # 主唱 + 翻译同组：翻译合并回主行的 x-translation span。
+        project.set_axis_groups(
+            [AxisGroup(name="主唱", singer_ids=[a, translator.id])]
+        )
+        page._on_export()
+        _drain_export(page, qapp)
+        text = (tmp_path / "song.ttml").read_text(encoding="utf-8")
+        assert 'ttm:role="x-translation"' in text
+        assert "翻译" in text
+
+        # 只选翻译：父行不在组内，翻译单独成 p（仍保留 x-translation）。
+        project.set_axis_groups(
+            [AxisGroup(name="翻译", singer_ids=[translator.id])]
+        )
+        page._on_export()
+        _drain_export(page, qapp)
+        text = (tmp_path / "song.ttml").read_text(encoding="utf-8")
+        assert 'ttm:role="x-translation"' in text
+        assert "あいう" not in text

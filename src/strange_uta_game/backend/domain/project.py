@@ -33,6 +33,8 @@ class ProjectMetadata:
     updated_at: datetime = field(default_factory=datetime.now)
     # 外部格式的附加元数据（如 AMLL 的 ncmMusicId/qqMusicId/isrc）。
     # 只存 JSON 可序列化值；缺失时为空，旧 .sug 文件保持兼容。
+    # 保留键 ``_ttmlSourceMeta`` 存多值固定字段（artists/album/musicName）
+    # 的源顺序快照，供 TTML 导出在用户未改字段时原样回写；宿主不必消费。
     extra: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -633,7 +635,8 @@ class Project:
         """
         meaningful_lines = [
             s for s in self.sentences
-            if any(c.total_timing_points > 0 for c in s.characters)
+            if not getattr(s, "aux_role", "")
+            and any(c.total_timing_points > 0 for c in s.characters)
         ]
 
         total_chars = sum(len(s.characters) for s in meaningful_lines)

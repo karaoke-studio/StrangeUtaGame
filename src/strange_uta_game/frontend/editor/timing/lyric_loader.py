@@ -16,7 +16,13 @@ from PyQt6.QtCore import QCoreApplication
 # 翻译统一走显式 QCoreApplication.translate（pylupdate6 只认直呼形态，
 # 模块级别名转发会把条目误标 vanished）。
 
-from strange_uta_game.backend.domain import Character, Ruby, RubyPart, Sentence, Singer
+from strange_uta_game.backend.domain import (
+    Character,
+    Ruby,
+    RubyPart,
+    Sentence,
+    Singer,
+)
 from strange_uta_game.backend.infrastructure.parsers.lyric_parser import (
     LRCParser,
     NicokaraParser,
@@ -458,6 +464,14 @@ def parse_lyric_content(
         if software_compensation_ms == 0:
             return sentences
         for sentence in sentences:
+            if sentence.aux_begin is not None:
+                sentence.aux_begin = max(
+                    0, sentence.aux_begin - software_compensation_ms
+                )
+            if sentence.aux_end is not None:
+                sentence.aux_end = max(
+                    0, sentence.aux_end - software_compensation_ms
+                )
             for ch in sentence.characters:
                 if ch.timestamps:
                     ch.timestamps = [
@@ -535,25 +549,29 @@ def parse_lyric_content(
             progress_cb(QCoreApplication.translate("LyricLoader", "正在解析 TTML 格式..."))
         from strange_uta_game.backend.infrastructure.parsers.ttml_parser import (
             TTMLParser,
+            build_aux_singer_specs,
+            build_ttml_sentences,
         )
 
         parser = TTMLParser()
         document = parser.parse_document(content)
 
         # agent 显示名 → Singer.id：优先复用同名演唱者，否则新建。
+        # 按源文件首次出现顺序建 Singer，并保留 agent id/type/命名状态，
+        # 供 TTML 导出时原样回写（未命名 agent 不再被固化成占位名）。
         singer_name_to_id: dict = {}
         singer_colors = [
             "#FF6B6B", "#4ECDC4", "#45B7D1", "#FFA07A", "#98D8C8",
             "#C9B1FF", "#F7DC6F", "#82E0AA", "#F1948A", "#85C1E9",
         ]
-        agent_names = sorted(
-            {
-                agent.name
-                for agent in document.agents.values()
-                if agent.name
-            }
-        )
-        for idx, name in enumerate(agent_names):
+        seen_agent_names: set = set()
+        ordered_agents = []
+        for agent in document.agents.values():
+            if agent.name and agent.name not in seen_agent_names:
+                seen_agent_names.add(agent.name)
+                ordered_agents.append(agent)
+        for idx, agent in enumerate(ordered_agents):
+            name = agent.name
             existing_id = None
             if project_singers:
                 for singer in project_singers:
@@ -564,14 +582,46 @@ def parse_lyric_content(
                 singer_name_to_id[name] = existing_id
             else:
                 color = singer_colors[idx % len(singer_colors)]
-                new_singer = Singer(name=name, color=color, is_default=False)
+                new_singer = Singer(
+                    name=name,
+                    color=color,
+                    is_default=False,
+                    ttml_agent_id=agent.id,
+                    ttml_agent_type=agent.type,
+                    ttml_agent_named=agent.named,
+                    ttml_agent_display_name=name,
+                    ttml_agent_source_name=agent.source_name,
+                )
                 singer_name_to_id[name] = new_singer.id
                 new_singers.append(new_singer)
 
-        sentences = parse_to_sentences(
-            document.lines,
+        # 辅助角色（翻译/音译/和声）也建 Singer，成为可分组/分轴的副轴。
+        aux_specs, aux_name_by_key = build_aux_singer_specs(document)
+        for offset, (name, role) in enumerate(aux_specs):
+            if name in singer_name_to_id:
+                existing_id = singer_name_to_id[name]
+                if project_singers:
+                    for existing in project_singers:
+                        if existing.id == existing_id and not existing.ttml_role:
+                            existing.ttml_role = role
+                continue
+            color = singer_colors[
+                (len(ordered_agents) + offset) % len(singer_colors)
+            ]
+            aux_singer = Singer(
+                name=name,
+                color=color,
+                is_default=False,
+                ttml_role=role,
+            )
+            singer_name_to_id[name] = aux_singer.id
+            new_singers.append(aux_singer)
+
+        sentences = build_ttml_sentences(
+            document,
             default_singer_id,
-            singer_name_to_id=singer_name_to_id,
+            singer_name_to_id,
+            aux_name_by_key=aux_name_by_key,
         )
         meta = parser.parse_metadata()
         meta["format"] = "ttml"

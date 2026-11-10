@@ -1606,3 +1606,16 @@ class TestKoreanSubAnnotation:
         service._apply_korean_to_sentence(sentence, keep_existing_timetags=False)
         # 走整曲韩文路径（片假名），未被 sub（罗马音）覆盖
         assert sentence.characters[0].ruby.parts[0].text == "ハン"
+
+
+def test_aux_sentence_skips_ruby_analysis():
+    """翻译/音译/和声副轴行不参与自动注音分析。"""
+    svc = AutoCheckService(DummyAnalyzer(), auto_check_flags={})
+    sentence = Sentence.from_text("翻译文本", "s1")
+    sentence.aux_role = "x-translation"
+    sentence.characters[0].set_check_count(3, force=True)
+
+    svc.analyze_and_apply_sentence_pipeline(sentence)
+
+    assert all(char.ruby is None for char in sentence.characters)
+    assert sentence.characters[0].check_count == 3

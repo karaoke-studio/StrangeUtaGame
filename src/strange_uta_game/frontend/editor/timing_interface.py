@@ -1776,7 +1776,11 @@ class EditorInterface(QWidget):
                         seg[-1].is_line_end = True
                     singer = (seg[0].singer_id if seg and seg[0].singer_id
                               else sentence.singer_id)
-                    new_s = Sentence(singer_id=singer, characters=seg)
+                    new_s = Sentence(
+                        singer_id=singer,
+                        characters=seg,
+                        song_part=sentence.song_part,
+                    )
                     project.sentences.insert(insert_after + 1, new_s)
                     insert_after += 1
 
@@ -4131,6 +4135,8 @@ class EditorInterface(QWidget):
 
         untimed = []
         for i, s in enumerate(self._project.sentences):
+            if getattr(s, "aux_role", ""):
+                continue
             if any(c.total_timing_points > 0 for c in s.characters) and not s.is_fully_timed():
                 untimed.append(self.tr("第 {line} 行「{text}」").format(line=i + 1, text=s.text))
                 if len(untimed) >= 10:
@@ -4423,19 +4429,20 @@ class EditorInterface(QWidget):
         def _mutate():
             modified = 0
             for sentence in project.sentences:
-                for ch in sentence.characters:
-                    if ch.check_count > 0 and ch.timestamps:
-                        ch.timestamps = [max(0, ts + delta_ms) for ts in ch.timestamps]
-                        modified += 1
-                    if ch.sentence_end_ts is not None:
-                        ch.sentence_end_ts = max(0, ch.sentence_end_ts + delta_ms)
-                    ch._update_offset_timestamps()
-                    ch.push_to_ruby()
-            if modified == 0 and all(
-                ch.sentence_end_ts is None
-                for sentence in project.sentences
-                for ch in sentence.characters
-            ):
+                before = (
+                    [list(ch.timestamps) for ch in sentence.characters],
+                    sentence.aux_begin,
+                    sentence.aux_end,
+                )
+                sentence.shift_times(delta_ms)
+                after = (
+                    [list(ch.timestamps) for ch in sentence.characters],
+                    sentence.aux_begin,
+                    sentence.aux_end,
+                )
+                if before != after:
+                    modified += 1
+            if modified == 0:
                 return None
             return (self._current_line_idx, self.preview._current_char_idx, None, "timetags")
 
@@ -4511,16 +4518,18 @@ class EditorInterface(QWidget):
         sentence = self._project.sentences[line_idx]
 
         def _mutate():
-            modified = 0
-            for ch in sentence.characters:
-                if ch.check_count > 0 and ch.timestamps:
-                    ch.timestamps = [max(0, ts + delta_ms) for ts in ch.timestamps]
-                    modified += 1
-                if ch.sentence_end_ts is not None:
-                    ch.sentence_end_ts = max(0, ch.sentence_end_ts + delta_ms)
-                ch._update_offset_timestamps()
-                ch.push_to_ruby()
-            if modified == 0 and all(ch.sentence_end_ts is None for ch in sentence.characters):
+            before = (
+                [list(ch.timestamps) for ch in sentence.characters],
+                sentence.aux_begin,
+                sentence.aux_end,
+            )
+            sentence.shift_times(delta_ms)
+            after = (
+                [list(ch.timestamps) for ch in sentence.characters],
+                sentence.aux_begin,
+                sentence.aux_end,
+            )
+            if before == after:
                 return None
             return (line_idx, self.preview._current_char_idx, None, "timetags")
 
@@ -9615,16 +9624,21 @@ class EditorInterface(QWidget):
 
         # 中文歌词检测：仅导入歌词的自动触发阶段启用；用户主动触发注音分析时
         # 视为明确需要注音，不再检测中文（避免纯汉字日文行被误判）。
+        main_text = "".join(
+            s.text
+            for s in self._project.sentences
+            if not getattr(s, "aux_role", "")
+        )
         chinese_mode = (
             auto_detect_chinese
             and auto_check_flags.get("chinese_lyrics_detection", True)
-            and is_chinese_lyrics("".join(s.text for s in self._project.sentences))
+            and is_chinese_lyrics(main_text)
         )
         # 韩文歌词检测：含谚文即韩文（无纯汉字歧义），注音分析与导入均启用；
         # 「韩文歌词检测」设置关闭时回落日文注音路径。
         korean_mode = (
             auto_check_flags.get("korean_lyrics_detection", True)
-            and is_korean_lyrics("".join(s.text for s in self._project.sentences))
+            and is_korean_lyrics(main_text)
         )
 
         # LLM 注音激活时不需要本地日语 IME，跳过 WinRT 安装引导。中文模式同样跳过。
@@ -9673,7 +9687,11 @@ class EditorInterface(QWidget):
                 pinyin_analyzer=pinyin_analyzer,
             )
         else:
-            lines = [s.text for s in self._project.sentences]
+            lines = [
+                s.text
+                for s in self._project.sentences
+                if not getattr(s, "aux_role", "")
+            ]
             analyzer = app_settings.build_ruby_analyzer(
                 lines, annotate_katakana_with_english=annotate_katakana_with_english
             )
@@ -10319,6 +10337,23 @@ class EditorInterface(QWidget):
                 False=只刷注音、保留现有节奏点不动。
         """
         if not self._project or not specs:
+            return
+        specs = [
+            item
+            for item in specs
+            if 0 <= item[0] < len(self._project.sentences)
+            and not getattr(self._project.sentences[item[0]], "aux_role", "")
+        ]
+        if not specs:
+            InfoBar.info(
+                title=self.tr("无需分析"),
+                content=self.tr("所选行是翻译/音译/和声副轴，不参与主歌词注音分析"),
+                orient=Qt.Orientation.Horizontal,
+                isClosable=True,
+                position=InfoBarPosition.TOP,
+                duration=3000,
+                parent=self,
+            )
             return
         if getattr(self, "_ruby_subset_analyzing", False):
             if not hasattr(self, "_ruby_analysis_queue"):

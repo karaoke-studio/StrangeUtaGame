@@ -141,7 +141,9 @@ class TestImportNotifications:
             )
             is True
         )
-        assert calls == [content]
+        # 工作树在 core.autocrlf=true 的 Windows 上会检出 CRLF；导入语义
+        # 按文本内容比较（XML 对换行不敏感），不应因换行风格失败。
+        assert [text.replace("\r\n", "\n") for text in calls] == [content]
 
     def test_import_ttml_from_file_rejects_missing_file(self):
         errors = []
@@ -281,3 +283,8 @@ class TestImportHandoff:
 
         assert MainWindow.import_ttml_from_text(host, "   ") is False
         assert errors
+
+
+def test_ttml_import_warnings_signal_exists():
+    """宿主可订阅导入时“无法修改/将丢弃”的内容列表。"""
+    assert hasattr(MainWindow, "ttml_import_warnings")

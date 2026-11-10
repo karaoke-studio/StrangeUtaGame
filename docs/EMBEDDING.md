@@ -70,7 +70,7 @@ embedded 模式显示“进入下一步”按钮；点击后直接发出该信�
 ### 2.1 分色分轴计划（axis_plan）
 
 同一 SUG 项目可按演唱者（分色）拆成宿主侧的多个轴文件。编辑入口是导出页
-的**「导出字幕分组」小窗**（Nicokara / Kirakara 格式显示，由原「演唱者过
+的**「导出字幕分组」小窗**（Nicokara / Kirakara / TTML 格式显示，由原「演唱者过
 滤」升级而来）：默认只显示分组摘要（每组一行胶囊卡片：主分组星标 + 组名
 + 成员色点；未分组 / 未入组单独提示），点「修改分组...」弹出大对话框编
 辑。对话框约束：竖排卡片横向排列，向右追加/删除分组（至少保留 1 组），
@@ -90,7 +90,7 @@ embedded「进入下一步」**不再自动弹窗**：分组编辑统一在小�
 
 standalone「导出」按组拆分（embedded 宿主不经过此路径，仅供理解语义）：
 
-- 存在 **1 个以上**分组且格式支持演唱者过滤（Nicokara / Kirakara）时，
+- 存在 **1 个以上**分组且格式支持演唱者过滤（Nicokara / Kirakara / TTML）时，
   按组导出多个文件，文件名追加 `_分组名`；单个分组 = 按该组过滤的普通
   导出（不加后缀）。其他格式忽略轴分组。
 - 每组文件的 @Emoji 标签按**本组实际使用的演唱者**解析触发词
@@ -122,7 +122,8 @@ standalone「导出」按组拆分（embedded 宿主不经过此路径，仅供�
 **每组的内容口径**（与 Nicokara 导出的演唱者过滤一致，见
 `nicokara_exporter.py`）：行内任一字符属于组内演唱者则保留整行（空行无
 条件保留），行内组外字符剔除。同一演唱者可同时属于多组；未入组演唱者
-的文本不进入任何轴。
+的文本不进入任何轴。TTML 的副轴行按自身 Singer 是否在组内决定去留；
+副轴父行也在同组时，副轴内容合并回父行的 `x-*` span。
 
 分组随 `.sug` 持久化（`axis_groups` 键，仅非空时写入；旧文件缺省 = 单
 轴）。宿主从磁盘加载 `.sug` 时可读到同一份数据，与 payload 快照同源。
@@ -132,15 +133,16 @@ standalone「导出」按组拆分（embedded 宿主不经过此路径，仅供�
 宿主与 SUG 之间可以用 TTML 作为**不依赖 SUG Project 对象**的歌词交换快照。
 当前实现覆盖 AMLL TTML DB 的核心子集：逐词 `<span begin/end>`、TTML2 ruby、
 `ttm:agent` 演唱者、`amll:meta` 曲名/艺人/专辑、根元素 `xml:lang` 语言，
-以及 SUG 自己追加的
+`itunes:song-part` 段落、翻译/音译/背景人声（导入为角色 Singer + 独立 Sentence），以及 SUG 自己追加的
 `x-sug-checkpoint` / `x-sug-release` / `x-sug-link` / `x-sug-no-cp` /
 `x-sug-untimed` / `x-sug-empty` role（第三方可忽略）。
 
 | 方向 | 接口 | 说明 |
 |---|---|---|
 | 宿主 → SUG | `import_ttml_from_text(...)` / `import_ttml_from_file(...)` | 先同步校验 XML/根元素/歌词行，再调用既有歌词解析 worker。返回 `True` 仅表示**已受理**；异步完成/失败通过 `ttml_import_finished(bool, message)` 发出。`switch_to_editor=False` 时宿主可留在自己的页面。**语义**：替换当前项目的歌词行，不创建新项目；当前项目有未保存歌词时默认拒绝并返回 `False`，宿主确认丢弃后传 `force=True`。 |
+| 丢弃内容提示 | `ttml_import_warnings(list)` | 导入完成时发出 SUG 无法编辑、TTML 导出会丢弃的内容类别（如 `tts` 样式、Apple Music sidecar 翻译、布局/图片等）。即使 SUG 用户勾选了“不再提示”，信号仍会发出；宿主可自行展示或记录。 |
 | SUG → 宿主 | `export_ttml_text() -> str \| None` | 纯内存序列化，不写文件、不改项目。空项目、无歌词或异常时返回 `None`。 |
-| 元数据 | `ProjectMetadata.extra` | AMLL 平台 ID（ncmMusicId / qqMusicId / spotifyId / appleMusicId）、ISRC、ttmlAuthor 等原样保留，随 `.sug` 持久化并随 `export_to_next_payload()` 的 `project` 快照交给宿主；导出 TTML 时回写为 `amll:meta`。 |
+| 元数据 | `ProjectMetadata.extra` | AMLL 平台 ID（ncmMusicId / qqMusicId / spotifyId / appleMusicId）、ISRC、ttmlAuthor 等原样保留，随 `.sug` 持久化并随 `export_to_next_payload()` 的 `project` 快照交给宿主；导出 TTML 时回写为 `amll:meta`。保留键 `_ttmlSourceMeta` 保存多艺人/多专辑/多曲名的源顺序快照，`_ttmlTimeStyle` 保存源时间书写风格（分钟制/时分秒/秒等），宿主无需消费。 |
 | 「进入下一步」 | `export_to_next_payload()["ttml"]` / `["ttml_meta"]` | `ttml` 为字符串快照；`ttml_meta` 为纯 dict（title/artist/album/language/extra）。与 `axis_plan` 并列的加法键；既有键（`project` / `nicokara_tags` / `source_path` / `media_path` / `media_kind` / `audio_path` / `axis_plan`）保持不变。 |
 
 典型嵌入顺序：
@@ -150,6 +152,7 @@ sug = MainWindow.for_embedding(parent, settings_provider=provider)
 
 # 歌词站/宿主文件检索 → SUG 打轴
 sug.ttml_import_finished.connect(on_ttml_import_finished)
+sug.ttml_import_warnings.connect(on_ttml_warnings)
 
 if ttml_from_db:
     # 文本或宿主已下载到本地的文件均可；默认保护未保存歌词
@@ -166,10 +169,34 @@ if ttml:
 
 **边界**：
 
-- `x-bg` 背景人声、`x-translation` 翻译、`x-roman` 音译暂不进入 SUG 主文本；
-  导入时忽略并记录 warning，避免把辅助轨静默混进主唱歌词。
-- TTML 的字体/颜色/图片与 songPart 分区不进入 SUG 数据模型，导出时不会
-  保留；平台 ID / ISRC / 作者等元数据进入 `ProjectMetadata.extra` 并保留。
+- 导入后 `project.singers` 会包含「翻译 (语言)」「音译」「和声」等角色
+  Singer；它们与普通演唱者一样进入 `axis_plan`，可作为独立副轴分组。
+- 辅助角色（`x-translation` 翻译、`x-roman` 音译、`x-bg` 背景人声，以及未知
+  `x-*` role）导入时转成独立 `Sentence` 行，并分配「翻译 (语言)」「音译」
+  「和声」等角色 Singer；`aux_parent_id` 关联主行，时间戳允许与主行重叠/
+  逆序。导出时由轴分组决定内容，不再提供独立的「TTML 辅助轨」勾选。
+- `ttm:agent` 的源 `xml:id` / `type` / 是否有 `ttm:name` 会保留：未命名 agent
+  导出时不写 `ttm:name`，用户重命名后才写新名字；同名 agent 展示名加 id
+  后缀，但导出回写源 `ttm:name`。
+- 导出页轴分组对 TTML 生效：配置多个分组时按 Singer 拆成多个 `.ttml`，文件
+  名追加 `_分组名`。副轴行与父行同组时合并回父行的 `x-*` span；父行不在
+  组内时副轴单独成 `p`。
+- `itunes:song-part` 落到 `Sentence.song_part`（同名属性 `songPart` / `song-part`
+  都接受），导出按连续相同段落分组的 `<div>` 回写；行详情对话框可编辑。
+- 源文件时间书写风格（分钟制 / 时分秒 / 秒 / 秒后缀、精度、补零）记录在
+  `ProjectMetadata.extra["_ttmlTimeStyle"]`，导出按该风格归一化回写；若用户
+  在 SUG 里打了超出该精度的毫秒时间，自动回退到完整 `HH:MM:SS.mmm` 避免截断。
+  同一文件混用多种风格时无法逐值保留原字符串。
+- SUG 无法承载/修改的 `tts` 样式、Apple Music sidecar 翻译/音译、布局/图片、
+  `amll:obscene` 等会在导入完成时通过 `ttml_import_warnings(list)` 通知；
+  SUG 自己的提示弹窗有「不再提示」（`import.ttml_dropped_features_suppressed`），
+  但宿主信号始终会发出。
+- 翻译/音译/和声是 TTML 专用副轴行；LRC/ASS/Nicokara 等导出会自动剔除，
+  不把副轴当普通主歌词。
+- 样式/字体/图片不进入 SUG 数据模型，导出时不会保留；`itunes:song-part`
+  已由 `Sentence.song_part` 承载并保留；平台 ID / ISRC / 作者等元数据进入
+  `ProjectMetadata.extra` 并保留。多值
+  artists/album/musicName 源值在用户未改字段时按原顺序回写。
 - `import_ttml_from_text()` / `import_ttml_from_file()` 的 `True` 只表示
   **已受理**；异步结果以 `ttml_import_finished(success, message)` 为准。
   同步校验失败直接返回 `False`，不发信号。

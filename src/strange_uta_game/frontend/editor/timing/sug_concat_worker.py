@@ -329,18 +329,12 @@ class SugConcatWorker(QObject):
             newly_added = all_sentences[-len(sentences_data):]
             if per_offset != 0:
                 for sentence in newly_added:
-                    for char in sentence.characters:
-                        char.timestamps = [ts - per_offset for ts in char.timestamps]
-                        if char.sentence_end_ts is not None:
-                            char.sentence_end_ts = char.sentence_end_ts - per_offset
+                    sentence.shift_times(-per_offset)
 
             # 再应用累计时间偏移（从前序 SUG 的时长 + 间隔累加）
             if accumulated_time_ms > 0:
                 for sentence in newly_added:
-                    for char in sentence.characters:
-                        char.timestamps = [ts + accumulated_time_ms for ts in char.timestamps]
-                        if char.sentence_end_ts is not None:
-                            char.sentence_end_ts = char.sentence_end_ts + accumulated_time_ms
+                    sentence.shift_times(accumulated_time_ms)
 
             accumulated_time_ms += entry.duration_ms + entry.gap_ms
 

@@ -10,7 +10,13 @@ from dataclasses import dataclass, field
 from typing import List, Optional, Tuple, Dict
 from pathlib import Path
 
-from strange_uta_game.backend.domain import Sentence, Character, Ruby, RubyPart
+from strange_uta_game.backend.domain import (
+    Sentence,
+    Character,
+    Ruby,
+    RubyPart,
+    AuxTrack,
+)
 from strange_uta_game.backend.infrastructure.parsers.encoding import decode_lyric_bytes
 
 logger = logging.getLogger(__name__)
@@ -86,6 +92,12 @@ class ParsedLine:
     # 行级演唱者显示名（TTML p 的 ttm:agent）；空 = 沿用 default_singer_id。
     # 仅用于把 Sentence.singer_id 一并还原，避免只有 Character 带 singer。
     line_singer_name: str = ""
+    # 本行携带的辅助轨（TTML 的翻译 / 音译 / 背景人声等）。非 TTML 格式为空。
+    aux_tracks: List[AuxTrack] = field(default_factory=list)
+    # AMLL/Apple Music 段落（Verse / Chorus / ...）；空 = 未标注。
+    song_part: str = ""
+    # 空 p 同时带 x-sug-empty 与辅助轨时，仍要保留空主行（否则重导入丢失）。
+    keep_empty_main: bool = False
 
 
 @dataclass
@@ -1781,7 +1793,18 @@ def parse_to_sentences(
     for parsed in parsed_lines:
         # 空行：保留为空 Sentence（用户排版意图）
         if not parsed.text:
-            sentences.append(Sentence(singer_id=singer_id, characters=[]))
+            empty_singer_id = singer_id
+            if parsed.line_singer_name and name_to_id:
+                empty_singer_id = name_to_id.get(
+                    parsed.line_singer_name, singer_id
+                )
+            sentences.append(
+                Sentence(
+                    singer_id=empty_singer_id,
+                    characters=[],
+                    song_part=parsed.song_part,
+                )
+            )
             continue
 
         sentence = Sentence.from_text(
@@ -2000,6 +2023,9 @@ def parse_to_sentences(
         # 否则导出器无法读到全局时间（这是旧版 bug）。
         for ch in sentence.characters:
             ch.set_offset(0)
+
+        if parsed.song_part:
+            sentence.song_part = parsed.song_part
 
         sentences.append(sentence)
 

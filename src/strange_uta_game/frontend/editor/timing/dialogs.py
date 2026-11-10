@@ -2782,6 +2782,7 @@ def execute_auto_interlude_guide(
                 mid_sentence = Sentence(
                     singer_id=ref_singer_id,
                     characters=list(guide_chars),
+                    song_part=sentence.song_part,
                 )
                 if guide_chars:
                     guide_chars[-1].is_line_end = True
@@ -2789,6 +2790,7 @@ def execute_auto_interlude_guide(
                 right_sentence = Sentence(
                     singer_id=ref_singer_id,
                     characters=right_chars,
+                    song_part=sentence.song_part,
                 )
                 if right_chars:
                     right_chars[-1].is_line_end = True

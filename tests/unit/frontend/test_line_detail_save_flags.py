@@ -147,10 +147,22 @@ def test_comma_singer_name_aborts_save(qapp, monkeypatch):
     _InfoBarRecorder.calls.clear()
 
     original_chars = sentence.characters
+    dialog.edit_song_part.setText("Chorus")
     dialog._on_save()
 
     errors = [kw for kind, kw in _InfoBarRecorder.calls if kind == "error"]
     assert errors and "逗号" in errors[0]["title"]
-    # 未重建字符、未标记已修改
+    # 未重建字符、未标记已修改、段落也未被部分写入
     assert sentence.characters is original_chars
+    assert sentence.song_part == ""
     assert dialog.was_modified() is False
+
+
+def test_song_part_edits_sentence(qapp):
+    project, singer, _other = _make_project()
+    sentence = Sentence.from_text("あ", singer.id)
+    dialog = LineDetailDialog(sentence, project=project)
+    dialog.edit_song_part.setText("Chorus")
+    dialog._on_save()
+    assert sentence.song_part == "Chorus"
+    dialog.deleteLater()

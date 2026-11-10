@@ -92,6 +92,69 @@ def test_roundtrip_identity_preserves_all(qapp):
     assert _snapshot(p) == before
 
 
+def test_apply_preserves_song_part_and_aux_rows(qapp):
+    """全文本应用不能把副轴行/段落标签降级成普通主行。"""
+    p, taro, _hanako = _build_project()
+    main = p.sentences[0]
+    main.song_part = "Verse"
+    aux = Sentence.from_text("译文", taro.id)
+    aux.aux_role = "x-translation"
+    aux.aux_parent_id = main.id
+    aux.aux_lang = "zh-CN"
+    p.sentences.insert(1, aux)
+
+    w = RubyInterface()
+    w.set_project(p)
+    w._on_apply_changes()
+
+    assert p.sentences[0].song_part == "Verse"
+    assert p.sentences[1].aux_role == "x-translation"
+    assert p.sentences[1].aux_parent_id == p.sentences[0].id
+    assert p.sentences[1].aux_lang == "zh-CN"
+
+
+def test_apply_does_not_move_aux_role_to_inserted_line(qapp):
+    """行号变化时按旧文本匹配，不能把翻译角色套到新插入的行。"""
+    p, taro, _hanako = _build_project()
+    main = p.sentences[0]
+    main.song_part = "Verse"
+    aux = Sentence.from_text("译文", taro.id)
+    aux.aux_role = "x-translation"
+    aux.aux_parent_id = main.id
+    p.sentences.insert(1, aux)
+
+    w = RubyInterface()
+    w.set_project(p)
+    w.text_edit.setPlainText("新行\n" + w.text_edit.toPlainText())
+    w._on_apply_changes()
+
+    assert p.sentences[0].text == "新行"
+    assert p.sentences[0].aux_role == ""
+    translated = [s for s in p.sentences if s.text == "译文"]
+    assert translated and translated[0].aux_role == "x-translation"
+    assert translated[0].aux_parent_id in {s.id for s in p.sentences}
+
+
+def test_apply_keeps_aux_role_when_aux_text_is_edited(qapp):
+    p, taro, _hanako = _build_project()
+    main = p.sentences[0]
+    aux = Sentence.from_text("译文", taro.id)
+    aux.aux_role = "x-translation"
+    aux.aux_parent_id = main.id
+    p.sentences.insert(1, aux)
+
+    w = RubyInterface()
+    w.set_project(p)
+    w.text_edit.setPlainText(
+        w.text_edit.toPlainText().replace("[T]文[>T]", "[T]文改[>T]")
+    )
+    w._on_apply_changes()
+
+    changed = [s for s in p.sentences if s.text == "译文改"]
+    assert changed and changed[0].aux_role == "x-translation"
+    assert changed[0].aux_parent_id == p.sentences[0].id
+
+
 def test_line_swap_follows_text(qapp):
     """整行重排后，各行时间轴跟随其文本，不串行、不丢失。"""
     p, taro, hanako = _build_project()

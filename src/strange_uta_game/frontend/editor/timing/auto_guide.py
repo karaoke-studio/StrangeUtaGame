@@ -262,6 +262,7 @@ def apply_auto_guide_candidates(
                 right_sentence = Sentence(
                     singer_id=candidate.target.singer_id or sentence.singer_id,
                     characters=right_chars,
+                    song_part=sentence.song_part,
                 )
                 project.sentences.insert(sentence_idx + 1, guide_sentence)
                 project.sentences.insert(sentence_idx + 2, right_sentence)

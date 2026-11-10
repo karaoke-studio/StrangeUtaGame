@@ -207,6 +207,8 @@ class MainWindow(MSFluentWindow):
     # TTML 宿主导入的异步完成信号：(success, message)。
     # 只在 import_ttml_from_text / import_ttml_from_file 受理后发出。
     ttml_import_finished = pyqtSignal(bool, str)
+    # TTML 导入时发现 SUG 无法修改、导出会丢弃的内容；宿主可自行展示/记录。
+    ttml_import_warnings = pyqtSignal(list)
 
     def __init__(self, embedded: bool = False, settings_provider=None, progress_callback=None, ai_timing_host=None):
         # 嵌入模式不经过仓库根目录的 main.py，因此在主窗口入口也安装一次。

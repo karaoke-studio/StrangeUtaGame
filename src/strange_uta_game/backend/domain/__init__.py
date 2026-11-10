@@ -22,6 +22,7 @@ from .models import (
 from .entities import (
     Singer,
     AxisGroup,
+    AuxTrack,
     Sentence,
 )
 
@@ -46,6 +47,7 @@ __all__ = [
     # 实体
     "Singer",
     "AxisGroup",
+    "AuxTrack",
     "Sentence",
     # 聚合根
     "ProjectMetadata",

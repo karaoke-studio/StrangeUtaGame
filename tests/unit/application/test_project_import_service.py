@@ -75,9 +75,14 @@ class TestLoadLyricsFromFile:
 
         sentences = ProjectImportService.load_lyrics_from_file(path, SINGER_ID)
 
-        assert len(sentences) == 5
-        assert sentences[0].text == "夢を見る"
-        assert sentences[0].characters[0].timestamps == [1000]
+        assert len(sentences) == 6
+        main_lines = [s for s in sentences if not s.aux_role]
+        aux_lines = [s for s in sentences if s.aux_role]
+        assert len(main_lines) == 5 and len(aux_lines) == 1
+        assert main_lines[0].text == "夢を見る"
+        assert main_lines[0].characters[0].timestamps == [1000]
+        assert aux_lines[0].aux_role == "x-translation"
+        assert aux_lines[0].text == "向着光"
         # 服务没有 Singer 列表：全部先归默认演唱者。
         assert all(s.singer_id == SINGER_ID for s in sentences)
 
@@ -109,7 +114,8 @@ class TestLoadLyricsFromFile:
             path, SINGER_ID
         )
 
-        assert len(sentences) == 5
+        assert len(sentences) == 6
+        assert len([s for s in sentences if not s.aux_role]) == 5
         assert metadata["format"] == "ttml"
         assert metadata["title"] == "SUG TTML Roundtrip"
         assert metadata["artist"] == "初音ミク / 鏡音リン"

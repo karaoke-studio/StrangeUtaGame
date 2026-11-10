@@ -7,6 +7,7 @@ from PyQt6.QtWidgets import (
     QHeaderView,
     QTableWidgetItem,
     QAbstractItemView,
+    QLineEdit,
 )
 from PyQt6.QtCore import Qt, QEvent
 from PyQt6.QtGui import QFont, QColor, QKeyEvent, QKeySequence
@@ -362,6 +363,14 @@ def _clone_sentence(sentence: Sentence) -> Sentence:
     return Sentence(
         singer_id=sentence.singer_id,
         characters=[_clone_character(character) for character in sentence.characters],
+        song_part=sentence.song_part,
+        aux_role=sentence.aux_role,
+        aux_parent_id=sentence.aux_parent_id,
+        aux_lang=sentence.aux_lang,
+        aux_agent=sentence.aux_agent,
+        aux_order=sentence.aux_order,
+        aux_begin=sentence.aux_begin,
+        aux_end=sentence.aux_end,
     )
 
 
@@ -417,6 +426,19 @@ class LineDetailDialog(QDialog):
             "停顿点列填写「是」标记为停顿点（独立记录释放时间），留空取消；演唱者每字符一项"
         ))
         self.vbox.addWidget(hint)
+
+        # 段落（AMLL/Apple Music itunes:song-part）：行级属性，不占用字符表。
+        part_row = QHBoxLayout()
+        part_row.addWidget(QLabel(self.tr("段落："), self))
+        self.edit_song_part = QLineEdit(getattr(self.sentence, "song_part", ""), self)
+        self.edit_song_part.setPlaceholderText(
+            self.tr("Verse / Chorus / PreChorus / Bridge / Intro / Outro ...")
+        )
+        self.edit_song_part.setToolTip(
+            self.tr("TTML 导出时写入 div 的 itunes:song-part；留空表示不标段落")
+        )
+        part_row.addWidget(self.edit_song_part, 1)
+        self.vbox.addLayout(part_row)
 
         # Table
         char_toolbar = QHBoxLayout()
@@ -720,6 +742,10 @@ class LineDetailDialog(QDialog):
             ch.set_offset(global_offset)
         self.sentence.characters = new_characters
         _fix_sentence_character_invariants(self.sentence)
+        song_part = self.edit_song_part.text().strip()
+        if song_part != self.sentence.song_part:
+            self.sentence.song_part = song_part
+            self._modified = True
         self._modified = True
         # Refresh the table to show saved state
         self._populate_table()
@@ -990,9 +1016,12 @@ class EditInterface(QWidget):
             return
 
         sentences = self.project.sentences
-        meaningful_lines = [
+        table_lines = [
             s for s in sentences
             if any(c.total_timing_points > 0 for c in s.characters)
+        ]
+        meaningful_lines = [
+            s for s in table_lines if not getattr(s, "aux_role", "")
         ]
         total_lines = len(meaningful_lines)
         completed_lines = sum(1 for s in meaningful_lines if s.is_fully_timed())
@@ -1002,8 +1031,8 @@ class EditInterface(QWidget):
             "共 {total} 行 | 已完成 {done} 行 | 进度 {pct:.1f}%"
         ).format(total=total_lines, done=completed_lines, pct=progress))
 
-        self.table.setRowCount(total_lines)
-        for i, sentence in enumerate(meaningful_lines):
+        self.table.setRowCount(len(table_lines))
+        for i, sentence in enumerate(table_lines):
             # 1. 行号
             item_idx = QTableWidgetItem(str(i + 1))
             item_idx.setFlags(item_idx.flags() & ~Qt.ItemFlag.ItemIsEditable)

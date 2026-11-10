@@ -401,7 +401,9 @@ def test_long_word_join_shortcut_waits_for_hold_threshold(qapp, monkeypatch):
 
     QTest.keyPress(popup.edit_ruby, Qt.Key.Key_F6)
     assert calls == []
-    QTest.qWait(30)
+    # 阈值 20ms；整套测试并发负载下 30ms 余量过小，等待 120ms 避免计时器
+    # 被事件循环延迟造成假失败（单测本身只验证“超过阈值后才触发”）。
+    QTest.qWait(120)
     assert calls == [True]
     QTest.keyRelease(popup.edit_ruby, Qt.Key.Key_F6)
 

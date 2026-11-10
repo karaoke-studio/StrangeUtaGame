@@ -264,7 +264,9 @@ class AiTimingService:
         snap.project_ok = project is not None
         if project is not None:
             snap.has_content = any(
-                len(s.characters) > 0 for s in project.sentences
+                len(s.characters) > 0
+                and not getattr(s, "aux_role", "")
+                for s in project.sentences
             )
 
         plan: Optional[PronunciationPlan] = None
@@ -385,7 +387,8 @@ class AiTimingService:
 
         # §8.1-1/3：工程与音频
         if project is None or not any(
-            len(s.characters) > 0 for s in project.sentences
+            len(s.characters) > 0 and not getattr(s, "aux_role", "")
+            for s in project.sentences
         ):
             raise AiTimingError("当前工程没有可对齐的歌词正文")
         if not audio_path or not Path(audio_path).is_file():
@@ -733,6 +736,8 @@ class AiTimingService:
             return []
         lines = []
         for i, sentence in enumerate(project.sentences):
+            if getattr(sentence, "aux_role", ""):
+                continue
             lines.append((i, sentence.global_timing_start_ms, None))
         try:
             return plan_windows(lines, duration_ms)

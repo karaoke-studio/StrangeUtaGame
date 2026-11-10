@@ -43,6 +43,7 @@ from qfluentwidgets import (
 from qfluentwidgets.components.widgets.menu import TextEditMenu
 
 import re
+import difflib
 from typing import Optional, List
 
 from strange_uta_game.backend.domain import (
@@ -65,6 +66,10 @@ _STRIP_SINGER_RE = re.compile(r"【[^】]*】")
 # 仅剥合规注音块：原文非空 + 含 ||（不合规块保留原样参与字宽统计）
 _STRIP_RUBY_VALID_RE = re.compile(r"\{([^}]+?)\|\|[^}]*\}")
 _STRIP_TIMESTAMP_RE = re.compile(r"\[>?(?:T|\d+:\d{2}\.\d{2})\]")  # 仅剥合法 token：[T]/[>T]/[mm:ss.xx]
+
+
+def _text_similarity(left: str, right: str) -> float:
+    return difflib.SequenceMatcher(None, left or "", right or "").ratio()
 
 
 def _strip_line_tags(line: str) -> str:
@@ -1095,11 +1100,20 @@ class RubyInterface(QWidget):
             "ruby_dictionary.annotate_katakana_with_english", False
         )
 
+        main_text = (
+            "".join(
+                s.text
+                for s in self._project.sentences
+                if not getattr(s, "aux_role", "")
+            )
+            if self._project
+            else ""
+        )
         chinese_mode = (
             auto_detect_chinese
             and auto_check_flags.get("chinese_lyrics_detection", True)
             and bool(self._project)
-            and is_chinese_lyrics("".join(s.text for s in self._project.sentences))
+            and is_chinese_lyrics(main_text)
         )
 
         # 韩文歌词检测（含谚文即韩文，「韩文歌词检测」设置门控）：
@@ -1108,7 +1122,7 @@ class RubyInterface(QWidget):
         korean_mode = (
             auto_check_flags.get("korean_lyrics_detection", True)
             and bool(self._project)
-            and is_korean_lyrics("".join(s.text for s in self._project.sentences))
+            and is_korean_lyrics(main_text)
         )
         if korean_mode:
             korean_analyzer = None
@@ -1131,7 +1145,15 @@ class RubyInterface(QWidget):
         # 用户主动触发：不做中文检测——按下"自动分析全部注音"按钮即明确表达
         # 注音意图，避免纯汉字日文行被误判跳过。
         # LLM 整首一次发送：传入全部行文本以保留上下文（LLM 未激活时忽略）。
-        lines = [s.text for s in self._project.sentences] if self._project else []
+        lines = (
+            [
+                s.text
+                for s in self._project.sentences
+                if not getattr(s, "aux_role", "")
+            ]
+            if self._project
+            else []
+        )
         analyzer = app_settings.build_ruby_analyzer(
             lines, annotate_katakana_with_english=annotate_katakana_with_english
         )
@@ -1209,7 +1231,13 @@ class RubyInterface(QWidget):
         _korean = (
             _app_flags.get("korean_lyrics_detection", True)
             and bool(self._project)
-            and is_korean_lyrics("".join(s.text for s in self._project.sentences))
+            and is_korean_lyrics(
+                "".join(
+                    s.text
+                    for s in self._project.sentences
+                    if not getattr(s, "aux_role", "")
+                )
+            )
         )
         # LLM 注音激活时不需要本地日语 IME，跳过 WinRT 安装引导。
         if not _llm_active and not _korean:
@@ -1767,6 +1795,7 @@ class RubyInterface(QWidget):
 
         offset = self._global_offset()
         before_sentences = deepcopy(self._project.sentences)
+        old_sentences = list(self._project.sentences)
         new_sentences: List[Sentence] = []
         parse_errors = []
         inherited = default_singer
@@ -1787,7 +1816,73 @@ class RubyInterface(QWidget):
                 line_singer = chars[0].singer_id
             else:
                 line_singer = inherited or default_singer
-            new_sentences.append(Sentence(singer_id=line_singer, characters=chars))
+            sentence = Sentence(singer_id=line_singer, characters=chars)
+            new_sentences.append(sentence)
+
+        # 全文本格式不显示行级字段。行数与文本顺序完全没变时按位置继承；
+        # 发生增删/重排时必须按旧行文本匹配，绝不能把 x-translation/x-bg
+        # 角色或 parent_id 按新行号硬套到另一行上。
+        def _copy_line_fields(target: Sentence, source: Sentence) -> None:
+            target.id = source.id
+            target.song_part = source.song_part
+            target.aux_role = source.aux_role
+            target.aux_parent_id = source.aux_parent_id
+            target.aux_lang = source.aux_lang
+            target.aux_agent = source.aux_agent
+            target.aux_order = source.aux_order
+            target.aux_begin = source.aux_begin
+            target.aux_end = source.aux_end
+
+        same_sequence = (
+            len(new_sentences) == len(old_sentences)
+            and all(
+                new.text == old.text
+                for new, old in zip(new_sentences, old_sentences)
+            )
+        )
+        if same_sequence:
+            for new, old in zip(new_sentences, old_sentences):
+                _copy_line_fields(new, old)
+        else:
+            buckets: dict[str, List[Sentence]] = {}
+            for old in old_sentences:
+                buckets.setdefault(old.text, []).append(old)
+            assigned: List[Optional[Sentence]] = [None] * len(new_sentences)
+            for index, new in enumerate(new_sentences):
+                candidates = buckets.get(new.text)
+                if candidates:
+                    source = candidates.pop(0)
+                    _copy_line_fields(new, source)
+                    assigned[index] = source
+            # 文本被编辑过的行：用相似度找回原行，避免“只改了几个字”
+            # 就把翻译/和声行降级成普通主行。新插入的行通常相似度低，不会误配。
+            assigned_ids = {
+                id(source) for source in assigned if source is not None
+            }
+            unmatched_old = [
+                old for old in old_sentences if id(old) not in assigned_ids
+            ]
+            for index, new in enumerate(new_sentences):
+                if assigned[index] is not None or not unmatched_old:
+                    continue
+                best = max(
+                    unmatched_old,
+                    key=lambda old: _text_similarity(old.text, new.text),
+                )
+                if _text_similarity(best.text, new.text) < 0.6:
+                    continue
+                _copy_line_fields(new, best)
+                assigned[index] = best
+                unmatched_old.remove(best)
+            # 父行被删除/改了文本时，副轴退化为独立行，避免悬空 parent_id。
+            valid_ids = {sentence.id for sentence in new_sentences}
+            for new in new_sentences:
+                if (
+                    new.aux_role
+                    and new.aux_parent_id
+                    and new.aux_parent_id not in valid_ids
+                ):
+                    new.aux_parent_id = ""
 
         if parse_errors:
             InfoBar.warning(

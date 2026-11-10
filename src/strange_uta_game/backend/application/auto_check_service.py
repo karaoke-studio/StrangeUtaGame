@@ -2481,6 +2481,8 @@ class AutoCheckService:
         sentences = project.sentences
         total = len(sentences)
         for i, sentence in enumerate(sentences):
+            if getattr(sentence, "aux_role", ""):
+                continue
             before = sum(len(part.text) for ch in sentence.characters if ch.ruby for part in ch.ruby.parts)
             self._romanize_sentence_ruby(sentence)
             after = sum(len(part.text) for ch in sentence.characters if ch.ruby for part in ch.ruby.parts)
@@ -2746,6 +2748,8 @@ class AutoCheckService:
         total = len(sentences)
         if self._korean_mode:
             for i, sentence in enumerate(sentences):
+                if getattr(sentence, "aux_role", ""):
+                    continue
                 self._apply_korean_to_sentence(sentence, keep_existing_timetags)
                 if progress_callback is not None:
                     progress_callback("注音分析", i + 1, total)
@@ -2753,12 +2757,16 @@ class AutoCheckService:
             return
         if self._chinese_mode:
             for i, sentence in enumerate(sentences):
+                if getattr(sentence, "aux_role", ""):
+                    continue
                 self._apply_chinese_to_sentence(sentence, keep_existing_timetags)
                 if progress_callback is not None:
                     progress_callback("注音分析", i + 1, total)
             project.shift_selected_checkpoint_if_lost()
             return
         for i, sentence in enumerate(sentences):
+            if getattr(sentence, "aux_role", ""):
+                continue
             self.apply_to_sentence(
                 sentence, split_config, keep_existing_timetags, only_noruby,
                 apply_user_dict=apply_user_dict, skip_romanize=skip_romanize,
@@ -2785,6 +2793,8 @@ class AutoCheckService:
         sentences = project.sentences
         total = len(sentences)
         for i, sentence in enumerate(sentences):
+            if getattr(sentence, "aux_role", ""):
+                continue
             results = self.analyze_sentence(sentence)
             morpheme_ranges = _build_compound_ranges(results) or None
             self._apply_user_dictionary_to_sentence(sentence, morpheme_ranges=morpheme_ranges)
@@ -2932,6 +2942,8 @@ class AutoCheckService:
         sentences = project.sentences
         total = len(sentences)
         for i, sentence in enumerate(sentences):
+            if getattr(sentence, "aux_role", ""):
+                continue
             self.update_checkpoints_from_rubies(
                 sentence, split_config, preserve_ruby_segments=preserve_ruby_segments
             )
@@ -3037,7 +3049,6 @@ class AutoCheckService:
         update_checkpoints: bool = True,
     ) -> None:
         """单句注音分析 →（可选）节奏点更新。
-
         统一单句/子集注音分析管线，保证 apply_to_sentence 后一定跟
         update_checkpoints_from_rubies（除非显式关闭）。
 
@@ -3049,6 +3060,9 @@ class AutoCheckService:
             update_checkpoints: True=分析后重算节奏点（默认）；
                 False=只更新注音、保留现有节奏点不动。
         """
+        if getattr(sentence, "aux_role", ""):
+            # 翻译/音译/和声副轴行不做假名注音分析。
+            return
         # 中文模式：_analyzer 恒 None（构造时不创建日文分析器），句级
         # 管线必须像 apply_to_project 一样分流到按字符流的中文路径，
         # 否则逐句注音/拼音注音按钮每次都崩在
@@ -3242,6 +3256,8 @@ def delete_rubies_by_type_names(
     sentences = project.sentences
     total = len(sentences)
     for si, sentence in enumerate(sentences):
+        if getattr(sentence, "aux_role", ""):
+            continue
         kanji_linked = get_kanji_linked_indices(sentence.characters)
         for idx, ch in enumerate(sentence.characters):
             if not ch.ruby:
@@ -3321,6 +3337,9 @@ def delete_checkpoints_by_type_names(project: "Project", type_names: List[str]) 
 
     removed = 0
     for sentence in project.sentences:
+        if getattr(sentence, "aux_role", ""):
+            # 翻译/音译/和声副轴行不参与主歌词的节奏点清理。
+            continue
         kanji_linked = get_kanji_linked_indices(sentence.characters)
         for idx, ch in enumerate(sentence.characters):
             # 无节奏点也无停顿点标记的字符直接跳过（不计入 removed）
