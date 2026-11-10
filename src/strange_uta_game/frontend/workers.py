@@ -254,6 +254,11 @@ class ProjectLoadWorker(QObject):
         self._file_path = file_path
 
     def run(self) -> None:
+        from time import perf_counter
+
+        from strange_uta_game.frontend.perf_log import log_elapsed, perf_enabled
+
+        _perf_start = perf_counter() if perf_enabled() else None
         try:
             from strange_uta_game.backend.infrastructure.persistence.sug_io import (
                 SugProjectParser,
@@ -261,6 +266,17 @@ class ProjectLoadWorker(QObject):
 
             # 单次解析同时拿到 Project 与 extras，UI 侧不再二次解析文件
             project, extras = SugProjectParser.load_with_extras(self._file_path)
+            if _perf_start is not None:
+                # path 只记文件名：perf 日志的 key=value 分词对含空格的
+                # 全路径不健壮，且无需把用户目录结构写进本地诊断日志
+                from pathlib import Path
+
+                log_elapsed(
+                    "workers.project_load",
+                    _perf_start,
+                    lines=len(getattr(project, "sentences", []) or []),
+                    path=Path(self._file_path).name,
+                )
             self.finished.emit(project, self._file_path, extras)
         except Exception as e:
             self.error.emit(str(e))

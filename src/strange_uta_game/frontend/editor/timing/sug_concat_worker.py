@@ -12,6 +12,7 @@ from pathlib import Path
 import soundfile as sf  # noqa: F401  用于 sndfile probe
 from PyQt6.QtCore import QObject, pyqtSignal
 
+from strange_uta_game.backend.domain.models import get_ruby_pause_char
 from strange_uta_game.backend.infrastructure.persistence.sug_io import (
     SugMigrator,
     SugProjectParser,
@@ -315,8 +316,11 @@ class SugConcatWorker(QObject):
                     continue
 
             sentences_data = data.get("sentences", [])
+            # 停顿符循环外取一次传入（_dict_to_sentence 直调默认会逐句触发
+            # 设置读取，见 sug_io._dict_to_project 的同类说明）
+            pause_char = get_ruby_pause_char()
             for sentence_data in sentences_data:
-                sentence = SugProjectParser._dict_to_sentence(sentence_data)
+                sentence = SugProjectParser._dict_to_sentence(sentence_data, pause_char)
                 all_sentences.append(sentence)
 
             # 先撤销该 SUG 自身的偏移，还原到绝对音频时间轴

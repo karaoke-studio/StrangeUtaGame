@@ -585,6 +585,11 @@ class AppSettings:
         实例（新 key 与 ``__new__`` 按新 ``config_dir()`` 计算的 key 一致），
         避免新旧两个共享实例内存态分裂、互相覆盖。
         """
+        # config_dir() 现按 (SUG_CONFIG_DIR 值) 进程级缓存；标记文件已切换，
+        # 先清 app_dirs 的目录缓存，使 __new__ 的新 key 按新目录解析。
+        from strange_uta_game import app_dirs as _app_dirs
+
+        _app_dirs.reset_dir_cache()
         new_dir = Path(new_dir)
         self._config_path = new_dir / "config.json"
         self._dict_path = new_dir / "dictionary.json"

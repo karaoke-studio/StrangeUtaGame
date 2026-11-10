@@ -1503,7 +1503,16 @@ class EditorInterface(QWidget):
             if self._timing_service
             else CheckpointPosition()
         )
-        self._update_time_tags_display()
+        # 波形时间标签的全量重建（collect + set_time_tags）在大项目上是
+        # 主线程上的数十至数百毫秒大块，加载完成的同一帧里同步执行会把
+        # 窗口卡住（embedded 下直接冻结宿主窗体）。改走 33ms 单发调度：
+        # 编辑器先完成首帧绘制，标签在下一拍补齐，肉眼不可感。
+        # 替换已有项目时先同步清掉旧标签——保留音频路径下时长不为零、
+        # 鼠标事件不早退，若不清空，调度窗口内旧项目的标签仍可被命中
+        # （虽不越界、33ms 后自愈，但会造成瞬时错误选中）。
+        if previous_project is not None and hasattr(self, "timeline"):
+            self.timeline.set_time_tags([])
+        self._schedule_time_tags_update()
         self._update_status()
         # 重新应用设置（字体大小、行间距、对齐方式等）
         self._apply_settings()
@@ -9436,9 +9445,22 @@ class EditorInterface(QWidget):
         _perf_start = perf_counter() if perf_enabled() else None
         if self._time_tags_update_timer.isActive():
             self._time_tags_update_timer.stop()
-        # 使用渲染时间戳（带偏移），与波形显示对齐
-        tags = self._project.collect_all_global_timestamp_ms_with_chars()
-        self.timeline.set_time_tags(tags)
+        # 异常容纳：本方法经 set_project 走 33ms 单发调度后，不再有
+        # _on_data_changed 的 try/except 兜底（collect 遇到旧 .sug/第三方
+        # 导入混入的脏时间戳可能抛错，见文件前部对非 int 时间戳的说明）；
+        # 在 QTimer 槽内逃逸只会静默进 crash.log，这里就地记录并吞掉，
+        # 保持波形标签「尽力刷新」的既有语义。
+        try:
+            # 使用渲染时间戳（带偏移），与波形显示对齐
+            tags = self._project.collect_all_global_timestamp_ms_with_chars()
+            self.timeline.set_time_tags(tags)
+        except Exception as e:
+            import logging
+
+            logging.getLogger(__name__).warning(
+                "[TimingInterface] _update_time_tags_display 失败: %s",
+                e, exc_info=True)
+            return
         if _perf_start is not None:
             log_elapsed(
                 "editor.update_time_tags_display",

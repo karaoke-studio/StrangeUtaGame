@@ -259,7 +259,9 @@ def _make_set_project_stub(previous_project, *, flag, calls):
             setText=lambda *_: None,
         )),
         _apply_checkpoint_position=_rec(calls, "apply_checkpoint"),
-        _update_time_tags_display=_rec(calls, "update_timetags"),
+        # set_project 走 33ms 单发调度刷新波形时间标签（大项目首帧不被
+        # 全量重建卡住），桩随之从 _update_time_tags_display 换成调度器
+        _schedule_time_tags_update=_rec(calls, "update_timetags"),
         _update_status=_rec(calls, "update_status"),
         _apply_settings=_rec(calls, "apply_settings"),
         _clear_audio_state=_rec(calls, "clear_audio_state"),
@@ -286,6 +288,9 @@ def test_set_project_preserves_audio_when_flag_set():
     assert sync and sync[0][1] == (43210,) and sync[0][2] == {"mark_dirty": False}
     assert stub._preserve_audio_on_project_load is False  # 一次性标记已消费
     assert stub._project is new_project
+    # 波形时间标签经 33ms 调度刷新（防整行误删的回归护栏：删掉 set_project
+    # 里的 _schedule_time_tags_update 调用时此断言失败）
+    assert "update_timetags" in _names(calls)
 
 
 def test_set_project_clears_audio_without_flag():
