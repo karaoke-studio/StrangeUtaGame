@@ -57,6 +57,20 @@ def is_video_file(file_path: str) -> bool:
     return Path(file_path).suffix.lower() in VIDEO_EXTENSIONS
 
 
+def is_network_path(file_path: "str | Path") -> bool:
+    """是否为 UNC 网络路径（``//host/share`` 或 ``\\\\host\\share`` 开头）。
+
+    这类路径的存在性探测（``Path.exists`` / ``is_file``）走 SMB——宿主机
+    不可达时会同步等待网络超时重试（实测可达二十余秒）。UI 线程上的
+    任何同步探测都必须先过本判断；网络路径的存在性应在后台线程探测，
+    或交给异步加载链以失败回调呈现错误。
+
+    盘符映射到网络位置（如 ``Z:\\...``）无法从字符串识别，不在覆盖范围。
+    """
+    s = str(file_path)
+    return s.startswith("//") or s.startswith("\\\\")
+
+
 def get_ffmpeg_path() -> str:
     """获取 FFmpeg 可执行文件路径。
 

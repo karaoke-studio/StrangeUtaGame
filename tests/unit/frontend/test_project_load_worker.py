@@ -34,9 +34,13 @@ def test_worker_emits_project_and_extras(tmp_path):
     loaded, fp, extras = results[0]
     assert loaded.id == project.id
     assert fp == str(file_path)
+    # media_exists 是 worker 在后台线程顺带探测的存在性结果（UNC 媒体的
+    # exists() 在主线程会阻塞二十余秒，消费侧只认布尔值，不再 stat）。
+    # X:/media/song.mp3 不存在 → False。
     assert extras == {
         "nicokara_tags": {"tag1": {"enabled": True}},
         "media_path": "X:/media/song.mp3",
+        "media_exists": False,
     }
 
 

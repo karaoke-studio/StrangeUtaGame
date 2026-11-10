@@ -266,6 +266,17 @@ class ProjectLoadWorker(QObject):
 
             # 单次解析同时拿到 Project 与 extras，UI 侧不再二次解析文件
             project, extras = SugProjectParser.load_with_extras(self._file_path)
+            # 媒体存在性在此（后台线程）顺带探测：media_path 可能是 UNC
+            # 网络路径，宿主机不可达时 exists() 要同步等待 SMB 超时重试
+            # （实测二十余秒）——主线程消费侧拿到布尔值即可，绝不能再 stat。
+            media_path = (extras.get("media_path") or "").strip()
+            if media_path:
+                try:
+                    from pathlib import Path as _P
+
+                    extras["media_exists"] = _P(media_path).exists()
+                except OSError:
+                    extras["media_exists"] = False
             if _perf_start is not None:
                 # path 只记文件名：perf 日志的 key=value 分词对含空格的
                 # 全路径不健壮，且无需把用户目录结构写进本地诊断日志

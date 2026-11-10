@@ -929,7 +929,21 @@ class MainWindow(MSFluentWindow):
         if not media_path:
             return
 
-        if not Path(media_path).exists():
+        # 存在性判定与 file_loader._apply_project_extras 同一口径：优先用
+        # 后台线程带回的 media_exists；本地路径同步探测；网络路径（UNC）
+        # 跳过主线程探测、按「尝试加载」交给异步链报错——不可达 SMB 宿主
+        # 机的 exists() 会同步阻塞二十余秒。
+        media_exists = extras.get("media_exists")
+        if media_exists is None:
+            from strange_uta_game.backend.infrastructure.audio.video_converter import (
+                is_network_path,
+            )
+
+            if is_network_path(media_path):
+                media_exists = True
+            else:
+                media_exists = Path(media_path).exists()
+        if not media_exists:
             InfoBar.warning(
                 title=self.tr("媒体文件未找到"),
                 content=self.tr("上次关联的媒体文件不存在：{name}").format(name=Path(media_path).name),
@@ -1582,11 +1596,20 @@ class MainWindow(MSFluentWindow):
         """
         from pathlib import Path
 
+        from strange_uta_game.backend.infrastructure.audio.video_converter import (
+            is_network_path,
+        )
         from strange_uta_game.frontend.editor.timing.file_loader import (
             classify_supported_file,
         )
 
-        files = [path for path in file_paths if Path(path).is_file()]
+        # 本地路径同步过滤不存在文件；UNC 网络路径跳过探测（主线程 SMB
+        # 探测在宿主机不可达时阻塞二十余秒），保留交给后台加载验证。
+        files = [
+            path
+            for path in file_paths
+            if is_network_path(path) or Path(path).is_file()
+        ]
         if not files:
             InfoBar.error(
                 title=self.tr("无法打开文件"),
@@ -1671,7 +1694,13 @@ class MainWindow(MSFluentWindow):
         """
         from pathlib import Path
 
-        if not Path(file_path).is_file():
+        from strange_uta_game.backend.infrastructure.audio.video_converter import (
+            is_network_path,
+        )
+
+        # 本地路径才同步探测存在性；UNC 网络路径跳过（主线程 SMB 探测
+        # 在宿主机不可达时阻塞二十余秒），交由 load_project 后台解析验证。
+        if not is_network_path(file_path) and not Path(file_path).is_file():
             InfoBar.error(
                 title=self.tr("无法打开文件"),
                 content=self.tr("文件不存在: {path}").format(path=file_path),

@@ -216,3 +216,64 @@ def test_open_sug_kept_audio_skips_missing_file_check(tmp_path, monkeypatch):
     assert bars == []
     assert editor._preserve_audio_on_project_load is True
     assert editor.load_audio_calls == []
+
+
+# ── 媒体存在性探测：后台结果优先 / UNC 免主线程 stat ────────────────────
+
+
+def _stub_infobars(monkeypatch):
+    bars = []
+    monkeypatch.setattr(
+        file_loader_mod, "InfoBar",
+        type("InfoBarStub", (), {
+            "warning": staticmethod(lambda **kw: bars.append(kw)),
+            "error": staticmethod(lambda **kw: bars.append(kw)),
+            "success": staticmethod(lambda **kw: bars.append(kw)),
+        }),
+    )
+    return bars
+
+
+def test_open_sug_uses_background_media_exists_verdict(tmp_path, monkeypatch):
+    # 后台线程带回 media_exists=False：即使主线程 stat 该文件其实存在
+    # （模拟探测与消费之间存在竞态的保守面），也必须直接消费布尔值，
+    # 不做任何主线程探测、不发起加载。
+    media = str(tmp_path / "song.mp3")
+    Path(media).write_bytes(b"x")  # 故意创建：若消费侧错误地 stat 会走到加载
+    store = _StoreStub()
+    loader, editor, _ = _make_loader(store)
+    bars = _stub_infobars(monkeypatch)
+
+    _open(loader, extras={"media_path": media, "media_exists": False})
+
+    assert len(bars) == 1  # 「媒体文件未找到」警告
+    assert editor.load_audio_calls == []
+
+
+def test_open_sug_unc_media_without_verdict_skips_stat(monkeypatch):
+    # UNC 网络路径且无后台探测结果：跳过主线程 exists()（不可达 SMB 宿主
+    # 机会阻塞二十余秒），按「尝试加载」交给异步链，不弹未找到。
+    unc = "//192.168.0.99/share/song.mp3"
+    store = _StoreStub()
+    loader, editor, _ = _make_loader(store)
+    bars = _stub_infobars(monkeypatch)
+
+    _open(loader, extras={"media_path": unc})
+
+    assert bars == []
+    assert editor.load_audio_calls == [unc]
+
+
+def test_open_sug_local_media_without_verdict_stats(tmp_path, monkeypatch):
+    # 本地路径且无探测结果：维持旧行为——同步探测（本地 ~0ms），
+    # 存在则加载。
+    media = str(tmp_path / "song.mp3")
+    Path(media).write_bytes(b"x")
+    store = _StoreStub()
+    loader, editor, _ = _make_loader(store)
+    bars = _stub_infobars(monkeypatch)
+
+    _open(loader, extras={"media_path": media})
+
+    assert bars == []
+    assert editor.load_audio_calls == [media]

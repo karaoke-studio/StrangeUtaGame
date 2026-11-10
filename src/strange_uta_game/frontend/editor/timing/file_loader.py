@@ -19,6 +19,7 @@ from strange_uta_game.backend.infrastructure.audio.video_converter import (
     VIDEO_EXTENSIONS,
     is_embedded,
     is_ffmpeg_available,
+    is_network_path,
     is_video_file,
 )
 from strange_uta_game.frontend.settings.app_settings import AppSettings
@@ -220,11 +221,13 @@ class FileLoader:
                 continue
             path = str(Path(value).expanduser().absolute())
             key = self._recent_path_key(path)
-            if (
-                key in seen
-                or Path(path).suffix.lower() != ".sug"
-                or not Path(path).is_file()
-            ):
+            # 存在性过滤只对本地路径做同步探测：UNC 网络路径的 is_file()
+            # 在宿主机不可达时会同步阻塞二十余秒（SMB 超时重试），菜单
+            # 构建在主线程——网络路径一律保留，点击时由加载链验证。
+            local_missing = (
+                not is_network_path(path) and not Path(path).is_file()
+            )
+            if key in seen or Path(path).suffix.lower() != ".sug" or local_missing:
                 continue
             seen.add(key)
             paths.append(path)
@@ -271,7 +274,9 @@ class FileLoader:
 
     def open_recent_project(self, file_path: str) -> None:
         """从最近列表打开项目；文件失效时清理菜单记录。"""
-        if not Path(file_path).is_file():
+        # 本地路径才同步探测失效；UNC 网络路径跳过（主线程 SMB 探测可
+        # 阻塞二十余秒），直接交给 load_project 的后台解析验证。
+        if not is_network_path(file_path) and not Path(file_path).is_file():
             # recent_projects 会过滤并持久化失效路径。
             paths = self.recent_projects()
             if hasattr(self._editor, "toolbar"):
@@ -756,7 +761,19 @@ class FileLoader:
                 self._store.restore_media_path(media_path)
             return
 
-        if not Path(media_path).exists():
+        # 存在性判定：优先用 ProjectLoadWorker 在后台线程探测的
+        # media_exists（UNC 网络路径的 exists() 在宿主机不可达时会同步
+        # 等待 SMB 超时重试，实测二十余秒，主线程探测即冻结 UI）。
+        # 无探测结果时：本地路径同步探测（~0ms）；网络路径跳过探测按
+        # 「尝试加载」处理，由异步加载链（FFmpeg/BASS worker）失败时
+        # 报错——宁可异步报错，不在主线程阻塞。
+        media_exists = extras.get("media_exists")
+        if media_exists is None:
+            if is_network_path(media_path):
+                media_exists = True
+            else:
+                media_exists = Path(media_path).exists()
+        if not media_exists:
             InfoBar.warning(
                 title=self._editor.tr("媒体文件未找到"),
                 content=self._editor.tr("上次关联的媒体文件不存在：{name}").format(name=Path(media_path).name),
