@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -132,6 +133,52 @@ def _extracted_cache_name(video_path: str) -> str:
     # surrogatepass：Windows 路径可能含无法按严格 UTF-8 编码的字符
     digest = hashlib.sha1(key.encode("utf-8", "surrogatepass")).hexdigest()[:12]
     return f"{p.stem}_{digest}.mp3"
+
+
+# _extracted_cache_name 的指纹段：``_<12 位十六进制>`` 结尾
+_EXTRACTED_FINGERPRINT_RE = re.compile(r"_[0-9a-f]{12}$")
+
+
+def strip_extracted_fingerprint(stem: str) -> str:
+    """去掉 stem 末尾的内容指纹段（:func:`_extracted_cache_name` 的逆操作）。
+
+    ``video_1a2b3c4d5e6f`` → ``video``；结尾不是指纹段的 stem 原样返回
+    （含旧命名 ``<stem>.mp3`` 时代的产物，本就没有指纹可去）。
+    """
+    return _EXTRACTED_FINGERPRINT_RE.sub("", stem)
+
+
+def _is_extracted_product(file_path: "str | Path") -> bool:
+    """路径是否位于提取缓存目录（即本模块的产物，而非用户自己的音频）。"""
+    try:
+        return Path(file_path).resolve().is_relative_to(_get_cache_dir().resolve())
+    except (ValueError, OSError):
+        return False
+
+
+def audio_display_stem(file_path: "str | Path") -> str:
+    """从音频路径派生名称用的 stem：提取产物去掉指纹后缀，其余原样。
+
+    建议/默认保存名、备份名、导出文件名等由音频名派生的用户可见名字都应
+    经此函数取 stem，避免 ``video_1a2b3c4d5e6f`` 这样的缓存指纹混进文件名。
+    只对缓存目录内的产物生效：用户自己的 ``song_0123456789ab.mp3`` 不动。
+    """
+    stem = Path(file_path).stem
+    if _is_extracted_product(file_path):
+        stem = strip_extracted_fingerprint(stem)
+    return stem
+
+
+def audio_display_name(file_path: "str | Path") -> str:
+    """音频展示文件名（含扩展名）：提取产物去掉指纹后缀，其余原样。
+
+    时间轴音频名 / 加载提示等直接展示给用户的场合使用，与
+    :func:`audio_display_stem` 同一口径。
+    """
+    p = Path(file_path)
+    if not _is_extracted_product(p):
+        return p.name
+    return strip_extracted_fingerprint(p.stem) + p.suffix
 
 
 def clear_extracted_cache() -> None:

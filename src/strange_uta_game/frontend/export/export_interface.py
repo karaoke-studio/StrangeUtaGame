@@ -48,6 +48,9 @@ from strange_uta_game.backend.application.export_service import (
     ExportService,
     sanitize_export_basename,
 )
+from strange_uta_game.backend.infrastructure.audio.video_converter import (
+    audio_display_stem,
+)
 from strange_uta_game.backend.infrastructure.parsers.romaji import RomajiOptions
 from strange_uta_game.frontend.settings.settings_interface import (
     AppSettings,
@@ -692,7 +695,8 @@ class ExportInterface(QWidget):
         """根据当前 store 的音频 / 项目元数据刷新默认导出文件名。"""
         audio_path = getattr(self._store, "audio_path", None) if self._store else None
         if audio_path:
-            default_name = Path(audio_path).stem
+            # 视频提取的缓存产物名带指纹后缀，派生导出名时去掉
+            default_name = audio_display_stem(audio_path)
         elif self._project and self._project.metadata.title:
             default_name = self._project.metadata.title
         else:

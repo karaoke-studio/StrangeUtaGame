@@ -20,8 +20,11 @@ import soundfile as sf
 from strange_uta_game.backend.infrastructure.audio import video_converter
 from strange_uta_game.backend.infrastructure.audio.video_converter import (
     _extracted_cache_name,
+    audio_display_name,
+    audio_display_stem,
     clear_extracted_cache,
     extract_audio,
+    strip_extracted_fingerprint,
 )
 
 
@@ -72,6 +75,59 @@ class TestExtractedCacheName:
         st = os.stat(tiny_wav)
         os.utime(tiny_wav, ns=(st.st_atime_ns, st.st_mtime_ns + 10**9))
         assert _extracted_cache_name(tiny_wav) != n1
+
+
+class TestAudioDisplayName:
+    """提取产物的指纹后缀不应混进用户可见的文件名（保存名/导出名/展示名）。"""
+
+    def test_strip_is_inverse_of_cache_name(self, tiny_wav):
+        """去指纹是 _extracted_cache_name 的逆操作：还原原始 stem。"""
+        product_stem = Path(_extracted_cache_name(tiny_wav)).stem
+        assert product_stem != Path(tiny_wav).stem
+        assert strip_extracted_fingerprint(product_stem) == Path(tiny_wav).stem
+
+    @pytest.mark.parametrize(
+        "stem",
+        [
+            "song_a",  # 旧命名产物，本就没有指纹
+            "song_abcdef12345",  # 只有 11 位
+            "song_ABCDEF123456",  # 指纹恒为小写十六进制
+            "song_abcdef12345g",  # 含非十六进制字符
+            "songabcdef123456",  # 缺分隔下划线
+        ],
+    )
+    def test_strip_leaves_non_fingerprint_stem_alone(self, stem):
+        assert strip_extracted_fingerprint(stem) == stem
+
+    def test_strip_only_removes_trailing_fingerprint(self):
+        """原始视频名自身以指纹样式结尾时，只去掉最后追加的那一段。"""
+        assert (
+            strip_extracted_fingerprint("clip_0123456789ab_abcdef123456")
+            == "clip_0123456789ab"
+        )
+
+    def test_extracted_product_loses_fingerprint(self, cache_dir):
+        product = cache_dir / "my video_abcdef123456.mp3"
+        product.write_bytes(b"mp3-data")
+
+        assert audio_display_stem(str(product)) == "my video"
+        assert audio_display_name(str(product)) == "my video.mp3"
+
+    def test_legacy_product_name_unchanged(self, cache_dir):
+        legacy = cache_dir / "song_a.mp3"
+        legacy.write_bytes(b"old-legacy")
+
+        assert audio_display_stem(str(legacy)) == "song_a"
+        assert audio_display_name(str(legacy)) == "song_a.mp3"
+
+    def test_user_file_outside_cache_is_untouched(self, cache_dir, tmp_path):
+        """用户自己的音频即便以指纹样式结尾也不能被改名。"""
+        user_file = tmp_path / "music" / "song_0123456789ab.mp3"
+        user_file.parent.mkdir()
+        user_file.write_bytes(b"user-audio")
+
+        assert audio_display_stem(str(user_file)) == "song_0123456789ab"
+        assert audio_display_name(str(user_file)) == "song_0123456789ab.mp3"
 
 
 class TestClearExtractedCache:

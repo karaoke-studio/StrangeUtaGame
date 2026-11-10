@@ -15,6 +15,9 @@ from pathlib import Path
 
 from strange_uta_game import app_dirs
 from strange_uta_game.backend.domain import Project
+from strange_uta_game.backend.infrastructure.audio.video_converter import (
+    audio_display_stem,
+)
 from strange_uta_game.backend.infrastructure.persistence.sug_io import (
     SugProjectParser,
 )
@@ -309,7 +312,8 @@ class ProjectStore(QObject):
             if title.strip():
                 base = title.strip()
         if not base and self._audio_path:
-            base = Path(self._audio_path).stem
+            # 视频提取的缓存产物名带指纹后缀，派生保存名时去掉
+            base = audio_display_stem(self._audio_path)
         if not base:
             base = "untitled"
 
@@ -910,7 +914,7 @@ class ProjectStore(QObject):
             title = getattr(self._project.metadata, "title", "") or ""
             base = self._sanitize_filename(title)
         if not base and self._audio_path:
-            base = self._sanitize_filename(Path(self._audio_path).stem)
+            base = self._sanitize_filename(audio_display_stem(self._audio_path))
         return base or "untitled"
 
     def create_backup(self) -> Optional[str]:

@@ -60,6 +60,10 @@ from strange_uta_game.backend.application.export_service import (
 )
 from strange_uta_game.backend.domain import Character, Project, Sentence
 from strange_uta_game.backend.infrastructure.audio import AudioLoadError
+from strange_uta_game.backend.infrastructure.audio.video_converter import (
+    audio_display_name,
+    audio_display_stem,
+)
 from strange_uta_game.backend.infrastructure.exporters import get_exporter_by_name
 from strange_uta_game.backend.infrastructure.parsers.text_splitter import (
     CharType,
@@ -5564,7 +5568,9 @@ class EditorInterface(QWidget):
                 )
 
         self._audio_file_path = file_path
-        self.timeline.set_audio_name(Path(file_path).name)
+        # 主页选视频时这里拿到的是提取缓存产物，展示名去掉指纹后缀
+        audio_name = audio_display_name(file_path)
+        self.timeline.set_audio_name(audio_name)
 
         # 应用设置中的默认音量和速度
         if self._timing_service:
@@ -5603,7 +5609,7 @@ class EditorInterface(QWidget):
 
         InfoBar.success(
             title=self.tr("音频已加载"),
-            content=Path(file_path).name,
+            content=audio_name,
             orient=Qt.Orientation.Horizontal,
             isClosable=True,
             position=InfoBarPosition.TOP,
@@ -8478,7 +8484,7 @@ class EditorInterface(QWidget):
         store = getattr(self, "_store", None)
         audio_path = getattr(store, "audio_path", None) if store else None
         if audio_path:
-            base_name = Path(audio_path).stem
+            base_name = audio_display_stem(audio_path)
         elif self._project.metadata.title:
             base_name = self._project.metadata.title
         else:
