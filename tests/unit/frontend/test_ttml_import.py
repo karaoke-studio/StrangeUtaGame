@@ -168,7 +168,17 @@ def test_export_interface_lists_ttml_last(qapp):
         for i in range(page.format_list.count())
     ]
     assert names[-1] == "TTML"
-    assert page.format_list.item(len(names) - 1).text() == "TTML (.ttml)"
+    assert page.format_list.item(len(names) - 1).text() == "TTML（Beta） (.ttml)"
+
+
+def test_ttml_beta_marker_in_export_settings():
+    from strange_uta_game.frontend.settings.sub_interfaces.export import (
+        _FMT_TO_IDX,
+        _IDX_TO_FMT,
+    )
+
+    assert _FMT_TO_IDX["TTML"] == 13
+    assert _IDX_TO_FMT[13] == "TTML"
 
 
 def test_home_interface_detects_ttml():

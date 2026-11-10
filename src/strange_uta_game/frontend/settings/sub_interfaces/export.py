@@ -11,7 +11,7 @@ _FMT_TO_IDX = {
     "LRC (增强型)": 0, "LRC (逐行)": 1, "LRC (逐字)": 2,
     "KRA": 3, "TXT": 4, "SRT": 5, "txt2ass": 6, "ASS": 7,
     "Nicokara": 8, "Nicokara (带注音)": 9, "RL 编辑模式": 10,
-    "春日向注音": 11, "Kirakara": 12,
+    "春日向注音": 11, "Kirakara": 12, "TTML": 13,
     "春日向注音（带罗马音）": 12,  # 旧配置兼容
     "LRC": 0,  # 旧配置兼容
 }
@@ -19,7 +19,7 @@ _IDX_TO_FMT = {
     0: "LRC (增强型)", 1: "LRC (逐行)", 2: "LRC (逐字)",
     3: "KRA", 4: "TXT", 5: "SRT", 6: "txt2ass", 7: "ASS",
     8: "Nicokara", 9: "Nicokara (带注音)", 10: "RL 编辑模式",
-    11: "春日向注音", 12: "Kirakara",
+    11: "春日向注音", 12: "Kirakara", 13: "TTML",
 }
 
 
@@ -41,7 +41,7 @@ class ExportSubInterface(SubSettingInterface):
                     tr("LRC (增强型)"), tr("LRC (逐行)"), tr("LRC (逐字)"),
                     "KRA", "TXT", "SRT", "txt2ass", "ASS",
                     "Nicokara", tr("Nicokara (带注音)"), tr("RL 编辑模式"),
-                    tr("春日向注音"), "Kirakara",
+                    tr("春日向注音"), "Kirakara", tr("TTML（Beta）"),
                 ],
                 parent=g),
             title_source="默认导出格式",
@@ -50,7 +50,7 @@ class ExportSubInterface(SubSettingInterface):
             "LRC (增强型)", "LRC (逐行)", "LRC (逐字)",
             "KRA", "TXT", "SRT", "txt2ass", "ASS",
             "Nicokara", "Nicokara (带注音)", "RL 编辑模式",
-            "春日向注音", "Kirakara",
+            "春日向注音", "Kirakara", "TTML",
         ])
         self.card_export_dir = self._tr_register(
             BrowseSettingCard(FIF.FOLDER, tr("默认导出目录"),

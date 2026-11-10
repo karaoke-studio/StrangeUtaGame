@@ -54,9 +54,14 @@ def test_hidden_or_missing_parent_does_not_open_dialog():
 
 
 def test_dialog_lists_features_and_suppress_checkbox(qapp):
+    from strange_uta_game.frontend.fluent_widgets import FluentMessageBox
+
     dialog = TtmlDroppedFeaturesDialog(
         None, ["字体、颜色、位置、图片等 tts 样式", "Apple Music 头部翻译 / 音译 sidecar"]
     )
+    assert isinstance(dialog, FluentMessageBox)
+    assert dialog.cancelButton.isHidden()
+    assert dialog.yesButton.text() == "知道了"
     assert "不再提示" == dialog.check_suppress.text()
     assert dialog.suppress_future is False
     dialog.check_suppress.setChecked(True)

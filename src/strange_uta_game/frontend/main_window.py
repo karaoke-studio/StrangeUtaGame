@@ -2222,7 +2222,7 @@ class MainWindow(MSFluentWindow):
         """embedded TTML 导入失败的统一提示（不抛异常）。"""
         try:
             InfoBar.error(
-                title=self.tr("无法导入 TTML"),
+                title=self.tr("无法导入 TTML（Beta）"),
                 content=message,
                 orient=Qt.Orientation.Horizontal,
                 isClosable=True,

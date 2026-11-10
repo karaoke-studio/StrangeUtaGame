@@ -488,6 +488,7 @@ class ExportInterface(QWidget):
     def _tr_format_name(self, name: str) -> str:
         """显式枚举各 format key → 让 .ts 抽取器把源串纳入 ExportInterface
         上下文（变量参数的 self.tr(var) 抓不到）。"""
+        if name == "TTML":                 return self.tr("TTML（Beta）")
         if name == "LRC (增强型)":         return self.tr("LRC (增强型)")
         if name == "LRC (逐行)":           return self.tr("LRC (逐行)")
         if name == "LRC (逐字)":           return self.tr("LRC (逐字)")

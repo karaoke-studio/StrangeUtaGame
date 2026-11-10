@@ -278,7 +278,7 @@ class HomeInterface(QWidget):
         card_layout.addWidget(title)
 
         # 歌词输入区
-        lyric_label = CaptionLabel(self.tr("歌词文本（支持粘贴或导入 LRC/ASS/SRT/TXT）"))
+        lyric_label = CaptionLabel(self.tr("歌词文本（支持粘贴或导入 LRC/ASS/SRT/TXT/TTML Beta）"))
         card_layout.addWidget(lyric_label)
 
         self.text_lyrics = TextEdit()
@@ -289,7 +289,8 @@ class HomeInterface(QWidget):
             "- LRC 格式（逐行/逐字/增强型）\n"
             "- ASS 字幕格式\n"
             "- SRT 字幕格式\n"
-            "- KRA 格式\n\n"
+            "- KRA 格式\n"
+            "- TTML / AMLL 格式（Beta）\n\n"
             "导入文件将自动填充此区域，创建项目时解析"
         ))
         self.text_lyrics.setMinimumHeight(200)
@@ -301,6 +302,9 @@ class HomeInterface(QWidget):
 
         self.btn_import_lyric = PushButton(self.tr("导入歌词文件"), self)
         self.btn_import_lyric.setIcon(FIF.FOLDER)
+        self.btn_import_lyric.setToolTip(
+            self.tr("支持 LRC/ASS/SRT/TXT/KRA/TTML（Beta）")
+        )
         self.btn_import_lyric.clicked.connect(self._on_import_lyric)
         lyric_btn_layout.addWidget(self.btn_import_lyric)
 
@@ -387,7 +391,7 @@ class HomeInterface(QWidget):
             self,
             self.tr("选择歌词文件"),
             init_dir,
-            self.tr("歌词文件 (*.lrc *.txt *.kra *.krl *.ass *.srt *.ttml);;所有文件 (*.*)"),
+            self.tr("歌词文件 (*.lrc *.txt *.kra *.krl *.ass *.srt *.ttml);;TTML（Beta） (*.ttml);;所有文件 (*.*)"),
         )
 
         if file_path:
@@ -493,7 +497,7 @@ class HomeInterface(QWidget):
             warnings = self._ttml_meta.get("warnings")
             if warnings:
                 InfoBar.warning(
-                    title=self.tr("TTML 导入提示"),
+                    title=self.tr("TTML 导入提示（Beta）"),
                     content="\n".join(str(item) for item in warnings),
                     orient=Qt.Orientation.Horizontal,
                     isClosable=True,

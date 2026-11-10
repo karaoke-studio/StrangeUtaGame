@@ -3,9 +3,9 @@
 ## [Unreleased]
 
 ### 新增功能
-- **TTML / AMLL TTML 交换格式（SUG 侧前置工作）**：新增 `.ttml` 歌词导入与导出。
+- **TTML / AMLL TTML 交换格式（Beta，SUG 侧前置工作）**：新增 `.ttml` 歌词导入与导出。
   - 导入支持 AMLL TTML DB 的逐词 `<span begin/end>`、TTML2 ruby（`container` / `base` / `textContainer` / `text`）、`ttm:agent` 演唱者、`amll:meta` 曲名/艺人/专辑/语言；兼容 `begin+dur`、秒后缀 `15.8s`、`ttm:title`、空行/空句子与未命名 agent；LRC/TXT/KRA/ASS/SRT/Nicokara 等既有导入路径不变
-  - **songPart 支持**：读取 `itunes:songPart` / `itunes:song-part`，落到 `Sentence.song_part`，可在行详情里编辑；导出按连续段落分组成 `<div itunes:song-part="...">`
+  - **songPart 支持（Beta）**：读取 `itunes:songPart` / `itunes:song-part`，落到 `Sentence.song_part`，可在行详情里编辑；导出按连续段落分组成 `<div itunes:song-part="...">`
   - **时间格式归一化**：导入记录源文件主导时间书写风格（分钟制 / 时分秒 / 秒 / 秒后缀、精度、是否补零），导出时按该风格回写；语义仍统一按毫秒对齐。用户在 SUG 里打了超出源精度的毫秒时间时自动回退完整 `HH:MM:SS.mmm`，并为低精度输出补足非零 `end`，避免零长度 span
   - **全文本编辑保真**：应用全文本时按旧行文本/相似度匹配保留 `song_part`、副轴角色与父行关联；插入/重排不会把翻译角色套到错误行，改写副轴文本也不会退化成普通主行
   - **非 TTML 导出隔离**：LRC / ASS / Nicokara 等导出自动剔除翻译/音译/和声副轴行，避免副轴被当主歌词输出

@@ -5,15 +5,9 @@ from __future__ import annotations
 from typing import Iterable, List, Optional
 
 from PyQt6.QtCore import Qt
-from PyQt6.QtWidgets import (
-    QCheckBox,
-    QDialog,
-    QHBoxLayout,
-    QLabel,
-    QPushButton,
-    QVBoxLayout,
-)
+from qfluentwidgets import BodyLabel, CheckBox
 
+from strange_uta_game.frontend.fluent_widgets import FluentMessageBox
 from strange_uta_game.frontend.settings.app_settings import AppSettings
 
 DROPPED_FEATURES_SUPPRESSED_KEY = "import.ttml_dropped_features_suppressed"
@@ -37,43 +31,43 @@ def emit_ttml_import_warnings(widget, features: Iterable[str]) -> None:
         current = parent_getter() if callable(parent_getter) else None
 
 
-class TtmlDroppedFeaturesDialog(QDialog):
-    """列出 SUG 无法修改、TTML 导出会丢弃的内容，并允许不再提示。"""
+class TtmlDroppedFeaturesDialog(FluentMessageBox):
+    """项目标准 Fluent 消息框：列出 SUG 无法修改、TTML 导出会丢弃的内容。"""
 
     def __init__(self, parent, features: List[str]) -> None:
-        super().__init__(parent)
-        self.setWindowTitle(self.tr("TTML 导入提示"))
-        self.setModal(True)
-        self.setMinimumWidth(520)
-
-        layout = QVBoxLayout(self)
-        intro = QLabel(
+        super().__init__(
+            self.tr("TTML 导入提示（Beta）"),
             self.tr(
-                "AMLL/TTML 文件的以下内容无法在 SUG 中修改，导出为 TTML 时将被丢弃："
+                "AMLL/TTML 文件的以下内容无法在 SUG 中修改，"
+                "导出为 TTML 时将被丢弃："
             ),
-            self,
+            parent,
         )
-        intro.setWordWrap(True)
-        layout.addWidget(intro)
+        self.hideCancelButton()
+        self.yesButton.setText(self.tr("知道了"))
+        self.setContentCopyable(True)
+        self.contentLabel.setMinimumWidth(480)
 
         for feature in features:
-            item = QLabel(f"• {feature}", self)
+            item = BodyLabel(f"• {feature}", self)
             item.setWordWrap(True)
+            item.setMinimumWidth(480)
             item.setTextInteractionFlags(
                 Qt.TextInteractionFlag.TextSelectableByMouse
             )
-            layout.addWidget(item)
+            self.textLayout.addWidget(item)
 
-        self.check_suppress = QCheckBox(self.tr("不再提示"), self)
-        layout.addWidget(self.check_suppress)
+        self.check_suppress = CheckBox(self.tr("不再提示"), self)
+        self.textLayout.addWidget(self.check_suppress)
 
-        buttons = QHBoxLayout()
-        buttons.addStretch(1)
-        btn_ok = QPushButton(self.tr("知道了"), self)
-        btn_ok.setDefault(True)
-        btn_ok.clicked.connect(self.accept)
-        buttons.addWidget(btn_ok)
-        layout.addLayout(buttons)
+        self.textLayout.activate()
+        self.vBoxLayout.activate()
+        height = (
+            self.textLayout.sizeHint().height()
+            + self.buttonGroup.height()
+            + 24
+        )
+        self.setFixedSize(560, max(220, min(680, height)))
 
     @property
     def suppress_future(self) -> bool:

@@ -128,7 +128,7 @@ standalone「导出」按组拆分（embedded 宿主不经过此路径，仅供�
 分组随 `.sug` 持久化（`axis_groups` 键，仅非空时写入；旧文件缺省 = 单
 轴）。宿主从磁盘加载 `.sug` 时可读到同一份数据，与 payload 快照同源。
 
-### 2.2 TTML 交接接口（AMLL TTML 前置）
+### 2.2 TTML 交接接口（AMLL TTML 前置，Beta）
 
 宿主与 SUG 之间可以用 TTML 作为**不依赖 SUG Project 对象**的歌词交换快照。
 当前实现覆盖 AMLL TTML DB 的核心子集：逐词 `<span begin/end>`、TTML2 ruby、

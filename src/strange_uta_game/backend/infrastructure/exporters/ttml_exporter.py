@@ -285,7 +285,7 @@ class TTMLExporter(BaseExporter):
 
     @property
     def description(self) -> str:
-        return "AMLL TTML 逐词歌词（交换格式）"
+        return "AMLL TTML 逐词歌词（交换格式，Beta）"
 
     @property
     def file_extension(self) -> str:
@@ -293,7 +293,7 @@ class TTMLExporter(BaseExporter):
 
     @property
     def file_filter(self) -> str:
-        return "TTML 歌词文件 (*.ttml)"
+        return "TTML 歌词文件（Beta） (*.ttml)"
 
     def export(
         self,

@@ -337,7 +337,7 @@ class FileLoader:
         init_dir = self._store.working_dir if self._store else ""
         path, _ = QFileDialog.getOpenFileName(
             self._editor, self._editor.tr("选择歌词文件"), init_dir,
-            self._editor.tr("歌词文件 (*.lrc *.txt *.kra *.krl *.srt *.ass *.ttml);;所有文件 (*.*)"),
+            self._editor.tr("歌词文件 (*.lrc *.txt *.kra *.krl *.srt *.ass *.ttml);;TTML（Beta） (*.ttml);;所有文件 (*.*)"),
         )
         if path:
             self.load_lyrics(path, check_unsaved=False)
@@ -1032,7 +1032,7 @@ class FileLoader:
         warnings = (parse_meta or {}).get("warnings")
         if warnings:
             InfoBar.warning(
-                title=self._editor.tr("TTML 导入提示"),
+                title=self._editor.tr("TTML 导入提示（Beta）"),
                 content="\n".join(str(item) for item in warnings),
                 orient=Qt.Orientation.Horizontal,
                 isClosable=True,
