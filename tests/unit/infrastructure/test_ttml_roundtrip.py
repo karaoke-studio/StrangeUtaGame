@@ -562,35 +562,6 @@ def test_dropped_features_are_reported():
     assert "obscene" in joined
 
 
-def test_non_ttml_export_skips_auxiliary_lines(tmp_path):
-    from strange_uta_game.backend.application.export_service import ExportService
-
-    project = Project()
-    singer = project.singers[0]
-    main = Sentence.from_text("あ", singer.id)
-    main.characters[0].add_timestamp(1000)
-    main.characters[0].is_sentence_end = True
-    main.characters[0].set_sentence_end_ts(1500)
-    main.characters[0].set_offset(0)
-    project.add_sentence(main)
-
-    translator = Singer(
-        name="翻译", color="#4ECDC4", ttml_role="x-translation"
-    )
-    project.add_singer(translator)
-    aux = Sentence.from_text("译文", translator.id)
-    aux.aux_role = "x-translation"
-    aux.aux_parent_id = main.id
-    project.add_sentence(aux)
-
-    path = tmp_path / "out.lrc"
-    result = ExportService().export(project, "LRC (增强型)", str(path))
-    assert result.success
-    text = path.read_text(encoding="utf-8")
-    assert "あ" in text
-    assert "译文" not in text
-
-
 def test_background_container_end_fills_missing_child_end():
     content = (
         '<tt xmlns="http://www.w3.org/ns/ttml" '

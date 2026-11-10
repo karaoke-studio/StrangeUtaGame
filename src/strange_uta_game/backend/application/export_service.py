@@ -185,26 +185,9 @@ class ExportService:
                 TTMLExporter,
             )
 
-            # 翻译/音译/和声是 TTML 专用副轴行；LRC/ASS/Nicokara 等格式
-            # 不应把它们当普通歌词输出。轴分组过滤不能兜住“未分组”导出，
-            # 因此在这里统一剔除。
-            export_project = project
-            if not isinstance(exporter, TTMLExporter) and any(
-                getattr(sentence, "aux_role", "")
-                for sentence in project.sentences
-            ):
-                import copy
-
-                export_project = copy.copy(project)
-                export_project.sentences = [
-                    sentence
-                    for sentence in project.sentences
-                    if not getattr(sentence, "aux_role", "")
-                ]
-
             if isinstance(exporter, KirakaraExporter):
                 exporter.export(
-                    export_project,
+                    project,
                     file_path,
                     singer_ids=singer_ids,
                     insert_singer_tags=insert_singer_tags,
@@ -215,7 +198,7 @@ class ExportService:
                 )
             elif isinstance(exporter, NicokaraWithRubyExporter):
                 exporter.export(
-                    export_project,
+                    project,
                     file_path,
                     singer_ids=singer_ids,
                     insert_singer_tags=insert_singer_tags,
@@ -225,7 +208,7 @@ class ExportService:
                 )
             elif isinstance(exporter, NicokaraExporter):
                 exporter.export(
-                    export_project,
+                    project,
                     file_path,
                     singer_ids=singer_ids,
                     insert_singer_tags=insert_singer_tags,
@@ -235,13 +218,13 @@ class ExportService:
             elif isinstance(exporter, TTMLExporter):
                 # 轴分组导出：副轴行由所属 Singer 是否在组内决定去留。
                 exporter.export(
-                    export_project,
+                    project,
                     file_path,
                     singer_ids=singer_ids,
                     compensation_ms=software_compensation_ms,
                 )
             else:
-                exporter.export(export_project, file_path)
+                exporter.export(project, file_path)
 
             # 报告完成
             if self._progress_callback:

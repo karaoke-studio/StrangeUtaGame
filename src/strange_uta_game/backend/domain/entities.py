@@ -343,6 +343,7 @@ class Sentence:
     aux_begin: Optional[int] = None
     aux_end: Optional[int] = None
     # AMLL/Apple Music 段落（Verse / Chorus / ...）；空 = 未标注。
+    # 块级元数据，不是逐字演唱者分配。
     song_part: str = ""
 
     def __post_init__(self) -> None:

@@ -95,6 +95,7 @@ class ParsedLine:
     # 本行携带的辅助轨（TTML 的翻译 / 音译 / 背景人声等）。非 TTML 格式为空。
     aux_tracks: List[AuxTrack] = field(default_factory=list)
     # AMLL/Apple Music 段落（Verse / Chorus / ...）；空 = 未标注。
+    # 块级段落元数据，不是逐字演唱者分配。
     song_part: str = ""
     # 空 p 同时带 x-sug-empty 与辅助轨时，仍要保留空主行（否则重导入丢失）。
     keep_empty_main: bool = False

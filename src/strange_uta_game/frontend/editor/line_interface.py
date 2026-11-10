@@ -435,7 +435,10 @@ class LineDetailDialog(QDialog):
             self.tr("Verse / Chorus / PreChorus / Bridge / Intro / Outro ...")
         )
         self.edit_song_part.setToolTip(
-            self.tr("TTML 导出时写入 div 的 itunes:song-part；留空表示不标段落")
+            self.tr(
+                "TTML 导出时写入 div 的 itunes:song-part；这是歌曲段落"
+                "（Verse / Chorus 等），不是演唱者分配；留空表示不标段落"
+            )
         )
         part_row.addWidget(self.edit_song_part, 1)
         self.vbox.addLayout(part_row)

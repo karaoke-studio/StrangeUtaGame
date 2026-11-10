@@ -191,8 +191,8 @@ if ttml:
   `amll:obscene` 等会在导入完成时通过 `ttml_import_warnings(list)` 通知；
   SUG 自己的提示弹窗有「不再提示」（`import.ttml_dropped_features_suppressed`），
   但宿主信号始终会发出。
-- 翻译/音译/和声是 TTML 专用副轴行；LRC/ASS/Nicokara 等导出会自动剔除，
-  不把副轴当普通主歌词。
+- 翻译/音译/和声是普通 Sentence + 角色 Singer；其他导出格式按各自规则/轴分组
+  处理，不做 TTML 专用过滤。
 - 样式/字体/图片不进入 SUG 数据模型，导出时不会保留；`itunes:song-part`
   已由 `Sentence.song_part` 承载并保留；平台 ID / ISRC / 作者等元数据进入
   `ProjectMetadata.extra` 并保留。多值

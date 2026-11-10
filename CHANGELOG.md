@@ -1,64 +1,29 @@
 # Changelog
 
-## [Unreleased]
+## [1.7.5] - 2026-11-11
 
 ### 新增功能
-- **TTML / AMLL TTML 交换格式（Beta，SUG 侧前置工作）**：新增 `.ttml` 歌词导入与导出。
-  - 导入支持 AMLL TTML DB 的逐词 `<span begin/end>`、TTML2 ruby（`container` / `base` / `textContainer` / `text`）、`ttm:agent` 演唱者、`amll:meta` 曲名/艺人/专辑/语言；兼容 `begin+dur`、秒后缀 `15.8s`、`ttm:title`、空行/空句子与未命名 agent；LRC/TXT/KRA/ASS/SRT/Nicokara 等既有导入路径不变
-  - **songPart 支持（Beta）**：读取 `itunes:songPart` / `itunes:song-part`，落到 `Sentence.song_part`，可在行详情里编辑；导出按连续段落分组成 `<div itunes:song-part="...">`
-  - **时间格式归一化**：导入记录源文件主导时间书写风格（分钟制 / 时分秒 / 秒 / 秒后缀、精度、是否补零），导出时按该风格回写；语义仍统一按毫秒对齐。用户在 SUG 里打了超出源精度的毫秒时间时自动回退完整 `HH:MM:SS.mmm`，并为低精度输出补足非零 `end`，避免零长度 span
-  - **全文本编辑保真**：应用全文本时按旧行文本/相似度匹配保留 `song_part`、副轴角色与父行关联；插入/重排不会把翻译角色套到错误行，改写副轴文本也不会退化成普通主行
-  - **非 TTML 导出隔离**：LRC / ASS / Nicokara 等导出自动剔除翻译/音译/和声副轴行，避免副轴被当主歌词输出
-  - **丢弃内容提示**：导入时发现 `tts` 样式、Apple Music 头部 sidecar 翻译/音译、布局/图片、`amll:obscene` 等 SUG 无法修改的内容，弹出提示并列出类别；勾选「不再提示」后持久化到 `import.ttml_dropped_features_suppressed`。嵌入式宿主新增 `ttml_import_warnings(list)` 信号，即使 SUG 用户关闭提示也会收到
-  - **辅助角色独立成行**：`x-translation` 翻译、`x-roman` 音译、`x-bg` 背景人声（含逐词子 span）以及未知 `x-*` role 会转成独立的 `Sentence` 行，并分配「翻译 (语言)」「音译」「和声」等角色 Singer；`aux_parent_id` 关联主行，时间戳允许与主行重叠/逆序
-  - **agent 回环保真**：保留源 `xml:id` / `type`（person/group/other）/ 是否原本带 `ttm:name`；未命名 agent 不再凭空写名字，同名 agent 用 id 后缀区分展示、导出仍回写源 `ttm:name`；用户重命名后导出新名字
-  - `amll:meta` 的多艺人/多专辑/多曲名源值按原顺序回写；用户改过固定字段则只写当前项目值
-  - 新增 `TTML` 导出格式（AMLL TTML DB 风格，`itunes:timing="Word"`），保留逐字时间戳、ruby、演唱者、行尾释放、空行与 SUG 的 extra checkpoint / 句中停顿 / 连词 / 零节奏点 / 未打轴字符
-  - **按轴分组导出**：TTML 接入导出页轴分组，由组内 Singer 决定包含哪些主行/副轴行；副轴行与父行同组时合并回主行的 `x-translation` / `x-roman` / `x-bg` span，父行不在组内时副轴单独成行；不再提供独立的「TTML 辅助轨」勾选
-  - 「加载歌词」文件框、拖拽与主页导入识别 `.ttml`；主页创建项目时会保留 TTML 演唱者与曲名/艺人/专辑/语言
-  - 「加载歌词」遇到坏 `.ttml` 会先同步校验，不再先把当前项目换成空项目；剪贴板中的 TTML 不再被当普通字符插进当前行
-  - 后端 `ProjectImportService` 增加 `.ttml` 分支（文本/时间/元数据；该 API 没有 Singer 列表，多演唱者请走前端导入）
-  - 既有导出格式一个都不改：`TTML` 只追加在导出器注册表末尾
+- **新增 TTML（AMLL TTML）导入导出（Beta）**：`.ttml` 文件可通过「加载歌词」、拖拽或主页导入，导出格式列表新增 TTML。
+  - 保留逐字时间轴、注音、演唱者、翻译 / 音译 / 和声行、行尾释放与空行；支持 Apple Music 的 `songPart` 段落（行详情可编辑）与曲名 / 艺人 / 专辑 / 语言等元数据
+  - 翻译 / 音译 / 和声会作为独立歌词行显示，并自动分配「翻译」「音译」「和声」角色；导出 TTML 时按轴分组决定与主行合并还是单独成行
+  - 导入会提示 SUG 无法保留的样式、图片等平台内容，可勾选「不再提示」；坏的 `.ttml` 不会先清空当前项目
+  - Beta 边界：字体 / 样式 / 图片不保留；`songPart` 是块级段落元数据（Verse / Chorus 等），一行只能属于一个段落，不是逐字或逐演唱者属性
+- **AI 打轴支持自定义 / 本地对齐模型**（AI 打轴 → 高级选项 → 对齐模型）：可填 Hugging Face 仓库 ID 下载，或把模型文件夹放进模型目录后直接选择，无需走下载流程。
+  - 仅支持 Wav2Vec2 家族（拉丁字母 / 罗马字词表）：选择时即校验架构、权重、分词器与词表，不兼容会给出中文原因，不会跑到一半才失败
+  - 本地模型以相对路径记录，便携包整体移动后仍可用；更换权重或词表后不会误用旧的对齐缓存；模型 / 设备下拉会按当前设置正确回显
+- **F2 注音编辑器支持连续编辑**：在注音输入框开头按左键、末尾按右键会跳到相邻字，按上下键会跳到相邻行并保持列位置；打开时光标停在末尾，连续改注音不用反复按 F2。
+  - F2 打开时仍可用连词快捷键连词，注音与连词各自独立撤销
 
-- **AI 打轴支持自定义对齐模型**（AI 打轴窗口 → 高级选项 → 对齐模型 → 自定义模型）
-  - 可填 Hugging Face 仓库 ID 走受控下载（镜像、断点续传、完整性校验照旧），也可把已下载的模型文件夹**直接放进模型目录**，在弹窗「模型目录中已放入」列表中一键选择，无需经过下载流程；支持模型根下的文件夹、多套一层目录，以及文件直接摊在模型根里三种放法
-  - **仅支持 Wav2Vec2 家族**（`Wav2Vec2ForCTC` 架构 + 拉丁字母/罗马字词表）：对齐链路会把读音罗马化后送进 CTC，其它架构或假名/汉字词表不会报错，而是安静地产出错误时间轴——因此弹窗说明、下载与执行前预检共用同一句提示，本地目录在选中时即检查架构、权重（含 Git LFS 指针识别）、分词器与词表覆盖面，选错时给出可操作的中文原因；`architectures` 写成字符串/大小写不同也能识别，两者都缺失则拒绝；分词器要求 vocab.json / vocab.txt 形式（SentencePiece 二进制 `tokenizer.model` 无法校验词表，直接拒绝）；自定义仓库下载完成后也会跑同一次检查，不等 worker 跑到一半才失败
-  - 本地模型按「目录 + 全部权重与配置/分词器文件的指纹」记入对齐缓存键：换权重、改词表或只替换一个分片都不会再命中旧时间轴
-  - 模型目录内的本地模型以**相对路径**持久化：便携包整体移动、宿主更换模型根后仍可解析（根外目录保留绝对路径）
-  - 「自定义模型」已选中但没填内容时明确显示「未选择自定义模型」并阻断执行，不再静默回落默认模型；本地目录不提供「下载」，点下载也只提示无需下载（不会被误当成 HF 仓库去请求）
-  - 模型下拉与设备下拉现在会按设置回显（此前打开弹窗永远显示第一项，动一下别的设置就会把 provider / 设备写回默认）
-  - 自定义仓库下载不再写死「约 1.2GB / CC-BY-NC-SA-4.0」：体积未知时只报磁盘剩余，许可证由用户自行确认；下载完成后按兼容性检查结果提示（不兼容时明确说「已下载但无法使用」而不是「已就绪」）
-  - 下载白名单补上 `pytorch_model.bin` / 分片 bin / `tokenizer.model`，并收窄到权重文件名（`training_args.bin` 等训练产物不下载）；仓库同时提供 safetensors 时只下后者，但存在 `pytorch_model.bin.index.json` 时保留 bin 分片
-  - 模型扫描避开网络共享：`模型目录` 指向 UNC/网络驱动器时打开弹窗不自动扫描（避免 UI 冻结），改由用户点「刷新」
-  - worker 侧补齐自定义模型的兜底与硬校验：缺 `preprocessor_config.json` 时用 Wav2Vec2 默认特征参数重建 processor（配置存在时不再静默回退）；缺 CTC 头权重（`lm_head.*`）或 `pad_token_id`/分词器 pad 均缺失时直接中文报错；CTC blank 越界或出现在待对齐文本中会明确拒绝，不再猜测 0
+### 特性改变
+- **大项目加载明显加快**：8 万字符的工程从约 3.9 秒降到约 2.4 秒，加载期间界面不再长时间卡住，嵌入式宿主窗口同样受益。
 
-### 嵌入契约
-- 新增 `MainWindow.import_ttml_from_text(content, switch_to_editor=True, force=False)` 与 `import_ttml_from_file(path, ...)`：宿主可把 AMLL TTML 文本或本地 `.ttml` 文件直接交给 SUG；先同步校验 XML/根元素，再走既有异步导入。默认保护当前项目的未保存歌词，`force=True` 才允许替换
-- 新增 `ttml_import_finished(success, message)` 信号：已受理的 TTML 异步导入完成/失败时通知宿主；同步校验失败仍直接返回 `False`
-- 新增 `ProjectMetadata.extra`：AMLL 平台 ID（ncmMusicId/qqMusicId/spotifyId/appleMusicId）、ISRC、ttmlAuthor 等随 `.sug` 持久化，并在 TTML 导出时回写为 `amll:meta`
-- 新增 `MainWindow.export_ttml_text()`：不落盘返回当前项目的 TTML 字符串；空项目/失败返回 `None`
-- TTML 导出只在序列化期间临时注册 XML 命名空间，结束后恢复，避免污染 embedded 宿主的 ElementTree 输出
-- `export_to_next_payload()` 新增 `ttml`（字符串快照）与 `ttml_meta`（title/artist/album/language/extra 纯 dict），既有键与语义保持不变；详见 `docs/EMBEDDING.md` §2.2
-
-### 测试
-- 新增 `tests/unit/infrastructure/test_ttml_roundtrip.py`：自建 TTML 与真实 AMLL TTML DB 文件（`ncm-lyrics/101126.ttml`）的 export→import→export 模型签名回环
-- 新增 AMLL TTML DB 五个分区（ncm / qq / am / spotify / raw-lyrics）真实样本：翻译、音译、背景人声逐词时间轴、具名/未命名 agent、同名 person+group agent 的回环与稳定导出；样本来源见 `tests/fixtures/ttml/README.md`
-- 新增导出页 TTML 轴分组拆分、副轴行同组合并/不同组独立导出测试；新增 `.sug` 副轴 Sentence/角色 Singer/agent 来源持久化测试
-- 新增 songPart 回环、源时间风格检测/回写、丢弃内容识别与 `ttml_import_warnings` 信号测试
-- 新增 `tests/unit/frontend/test_ttml_import.py`、`tests/unit/test_ttml_embedded_handoff.py`；样本来源见 `tests/fixtures/ttml/README.md`
-- 新增 `tests/unit/application/test_ai_timing_local_models.py`：本地模型目录校验（架构 / 权重 / 分词器 / 词表 / Git LFS 指针）、模型目录扫描（多套一层与文件摊在根目录）、`filter_model_files` 的 `.bin` 去重，以及服务侧「本地目录 → worker model_id / 对齐缓存键（含换权重后失效）/ 失败阻断 / URL 输入」接线
-- 新增 `tests/unit/application/test_ai_timing_provider_guards.py`：用假 transformers/torch 覆盖 worker 的三道守卫（架构、缺 CTC 头权重、CTC blank 回退与越界）与 processor 兜底边界
-- 弹窗新增 10 个用例：自定义模型回显、模型目录扫描、选择持久化（相对路径）、手输路径规范化、切回默认清空、本地模型隐藏下载、本地模型拦截下载、未填内容阻断执行，以及两条**使用真实 `AiTimingService`** 的弹窗/服务契约用例
-
-### 已知边界
-- 翻译/音译/和声现在是独立歌词行 + 角色 Singer，可在编辑器和轴分组里看到；尚未提供“只显示主行”的折叠视图
-- `songPart` 支持按连续行分组导出；同一行内无法混排多个段落
-- 源时间风格按全文件多数派归一化；同一文件混用 `3:14.734` 与 `00:03:14.734` 时无法逐值保留原字符串
-- 样式/字体/图片不参与 SUG 数据模型，导出时不会保留；平台 ID / ISRC / 作者等进入 `ProjectMetadata.extra` 并保留
-- 多字 base + 多段 ruby 的极端写法只保留首字读音
-- 多值 `ttm:agent`（同一 `<p>` 引用多个演唱者）目前只使用第一个，并给出一次提示
-- 副轴行嵌套的非文本样式属性（如 `tts:ruby`、字体）不保证逐字节回写，但 role / 文本 / `xml:lang` / begin-end / 子 span 结构保留
-- 主页文本框仍显示原始 TTML 文本（解析在点击「创建项目」时进行），暂无 TTML 行数/歌词预览
+### 修复项目
+- 修复工程音频位于不可达的网络路径（如断开的 NAS / 共享盘）时，打开工程会卡住二十多秒的问题：现在网络路径不在界面线程探测，最近项目列表也不再等待；音频确实缺失时会明确报错
+- 修复 F2 注音编辑器里刚连词就保存注音会丢失修改的问题（社区贡献 @FMPeach）
+- 修复 Nicokara 导出行内重叠合唱（主歌词 + 括号和声）时，注音段被压成零长度、播放器显示不出注音的问题
+- 修复 KRL 导入 / 导出时歌词正文中的反斜杠未按 Kirakara 规则转义、往返后含义变化的问题（角色标签与注音内容不受影响，社区贡献 @FMPeach）
+- 修复独立启动时弹窗会让标题栏双击无法最大化、窗口边缘无法缩放的问题（社区贡献 @FMPeach）
+- 修复加载视频后，默认保存名、备份文件名、导出文件名与时间轴音频名带上一串缓存指纹后缀（如 `视频名_1a2b3c4d5e6f`）的问题：现在显示为原视频名
 
 ## [1.7.4] - 2026-10-21
 
