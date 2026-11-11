@@ -448,7 +448,7 @@ SUG 现已**完整支持国际音标**（[IPA](https://en.wikipedia.org/wiki/Int
   - 其他（Linux 等）：SIL 系 → Noto Sans → DejaVu Sans → FreeSans → Liberation Sans。
 - 配置键 `ui.ipa_font`（`"auto"` 默认，走候选链；可填已安装字体名覆盖）。读取点在
   `frontend/font_utils.py::set_ipa_font_override / ipa_font_family / phonetic_lyrics_font`。
-- 渲染几何改用**矢量轮廓墨水**（`QPainterPath.addText` 包围盒，含上下附加符），连词框 / wipe 裁剪 / 行墨水上下界全部按真实墨水计算；无字形码点的空矩形哨兵值（x≈100000）已归零防护。
+- 渲染几何：IPA/多码点簇改用**矢量轮廓墨水**（`QPainterPath.addText` 包围盒，含上下附加符），IPA 文本段的连词框 / wipe 裁剪 / 行墨水上下界按真实墨水计算；不含 IPA / 多码点簇的普通文本继续沿用 `tightBoundingRect` 像素口径，保证这类行与历史逐像素一致；孤立零 advance 附加符仍走矢量墨水兜底。无字形码点的空矩形哨兵值（x≈100000）已归零防护。
 - 注音整串单次排版（整簇同字体），分拍宽度按前缀 advance 累计测量（与绘制同源）。
 
 ### 10.4 保留字符与已知限制
@@ -502,6 +502,8 @@ CJK 基准行验证旧行为零回归。
 `tests/unit/domain/test_sentence_graphemes.py`（normalize/explode 往返）、
 `tests/unit/application/test_auto_check_ipa.py`（自动注音 + 格式往返 + .sug 自愈）、
 `tests/unit/frontend/test_karaoke_preview_ipa.py`（渲染几何：哨兵防护/IPA 字体标记/墨水 4 元组）、
+`tests/unit/frontend/test_karaoke_preview_legacy_geometry.py`（非 IPA 走字/注音 tight 像素口径、
+marker/hitbox 几何）、
 `tests/unit/application/test_ipa_review_fixes.py`（subagent 审查反馈的回归：纯修饰符串、
 正字法上标兼容、CJK 热路径、音节点×修饰符、查找簇映射）。
 

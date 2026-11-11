@@ -150,6 +150,122 @@ class TestRenderDataGeometry:
         entry = _render_data(preview, sentence)
         assert entry["char_uses_ipa"] == [True, False]
 
+    def test_mixed_line_gates_vector_ink_per_char(self, qapp, monkeypatch):
+        """同一行：普通汉字走 tight 像素口径，IPA 簇走矢量轮廓。"""
+        monkeypatch.setattr(preview_module, "theme", _DummyTheme())
+        sentence = Sentence.from_text("赤 t͡ʃ", singer_id="s")
+        preview = self._preview_with_distinct_ipa_font()
+        entry = _render_data(preview, sentence)
+        fm_main = preview._fm_current
+
+        assert entry["char_uses_ipa"][0] is False
+        cluster_idx = next(
+            i for i, flag in enumerate(entry["char_uses_ipa"]) if flag
+        )
+        tight = preview_module._wipe_ink_bounds(fm_main, "赤")
+        assert entry["char_ink_offsets"][0] == tight[0]
+        assert entry["char_ink_widths"][0] == tight[1]
+
+        vec = preview_module._vector_ink_bounds(
+            preview._font_current_ipa, "t͡ʃ"
+        )
+        assert vec is not None
+        assert entry["char_ink_offsets"][cluster_idx] == vec[0]
+        assert entry["char_ink_widths"][cluster_idx] == vec[2]
+
+        busy = fm_main.tightBoundingRect("赤")
+        assert entry["line_ink_top"] == min(busy.top(), vec[1])
+        assert entry["line_ink_bottom"] == max(busy.bottom(), vec[1] + vec[3])
+
+    def test_vector_ink_kept_when_ipa_font_equals_main_font(
+        self, qapp, monkeypatch
+    ):
+        """主字体==IPA 字体（has_ipa_styling=False）时 IPA 仍须用矢量墨水。"""
+        from PyQt6.QtGui import QFont, QFontMetrics
+
+        monkeypatch.setattr(preview_module, "theme", _DummyTheme())
+        sentence = Sentence.from_text("t͡ʃ", singer_id="s")
+        preview = preview_module.KaraokePreview()
+        preview._font_current_ipa = QFont(preview._font_current)
+        preview._fm_current_ipa = QFontMetrics(preview._font_current_ipa)
+        entry = _render_data(preview, sentence)
+
+        assert entry["ipa_styling"] is False
+        vec = preview_module._vector_ink_bounds(
+            preview._font_current, "t͡ʃ"
+        )
+        assert vec is not None
+        assert entry["char_ink_widths"][0] == vec[2]
+        assert entry["line_ink_top"] == vec[1]
+        assert entry["line_ink_bottom"] == vec[1] + vec[3]
+        # 不能退回字体盒/tight 口径
+        assert entry["line_ink_top"] != -preview._fm_current.ascent()
+
+    def test_paint_switches_font_only_with_independent_ipa_face(
+        self, qapp, monkeypatch
+    ):
+        """绘制层也必须遵守 ipa_styling：主字体==IPA 字体时不能切字体。"""
+        from PyQt6.QtGui import QFont, QFontMetrics, QImage
+
+        def paint_records(preview, sentence):
+            _render_data(preview, sentence)
+            real = preview_module._draw_split_text
+            records = []
+
+            def spy(painter, x, baseline, ch, colors, y_top, y_bottom):
+                font = painter.font()
+                records.append(
+                    (ch, tuple(font.families()), font.pointSizeF())
+                )
+                return real(painter, x, baseline, ch, colors, y_top, y_bottom)
+
+            monkeypatch.setattr(preview_module, "_draw_split_text", spy)
+            preview.resize(900, 300)
+            preview._visible_lines = 1
+            preview._current_line_idx = 0
+            preview._scroll_center_line = 0.0
+            preview.set_current_time_ms(3000)
+            image = QImage(preview.size(), QImage.Format.Format_ARGB32)
+            image.fill(0)
+            preview.render(image)
+            return records
+
+        def sample():
+            last = _mk(
+                "t͡ʃ", [], ts=[1500], line_end=True, sent_end=True
+            )
+            last.set_sentence_end_ts(2500)
+            return Sentence(
+                singer_id="s",
+                characters=[
+                    _mk("赤", [], ts=[1000]),
+                    _mk(" ", [], cc=0),
+                    last,
+                ],
+            )
+
+        # 1) 独立 IPA 字体：普通字用主字体，IPA 簇用 IPA 字体
+        monkeypatch.setattr(preview_module, "theme", _DummyTheme())
+        preview = self._preview_with_distinct_ipa_font()
+        records = paint_records(preview, sample())
+        used = {ch: (fams[0], size) for ch, fams, size in records}
+        assert used["赤"][0] == preview._font_current.families()[0]
+        assert used["t͡ʃ"][0] == preview._font_current_ipa.families()[0]
+
+        # 2) 主字体==IPA 字体（families 相同，仅字号不同，has_ipa_styling=False）：
+        #    绘制必须留在主字体，不能因 char_uses_ipa=True 切到 IPA 字体副本
+        preview = preview_module.KaraokePreview()
+        base = QFont(preview._font_current)
+        ipa = QFont(base)
+        ipa.setPointSizeF(base.pointSizeF() + 6)
+        preview._font_current_ipa = ipa
+        preview._fm_current_ipa = QFontMetrics(ipa)
+        records = paint_records(preview, sample())
+        sizes = {ch: size for ch, _fams, size in records}
+        assert sizes["赤"] == base.pointSizeF()
+        assert sizes["t͡ʃ"] == base.pointSizeF()
+        assert sizes["t͡ʃ"] != ipa.pointSizeF()
+
     def test_ruby_ink_is_4tuple_with_mark_height(self, qapp, monkeypatch):
         monkeypatch.setattr(preview_module, "theme", _DummyTheme())
         ch = _mk("天", ["tʰiɛn˥"], ts=[1000], line_end=True, sent_end=True)
@@ -164,12 +280,27 @@ class TestRenderDataGeometry:
 
     def test_zero_advance_char_gets_ink_width_cell(self, qapp, monkeypatch):
         monkeypatch.setattr(preview_module, "theme", _DummyTheme())
-        # 孤立附加符（零 advance、有墨水兜底显示）不能得到 0 宽格子
-        sentence = Sentence(singer_id="s", characters=[_mk("̃", [], cc=0)])
+        # 孤立附加符（零 advance、tight 无墨水）必须回退矢量轮廓得到格子，
+        # 不能变 0 宽而与后字重叠。字体相关，这里用固定矢量盒锁定逻辑。
+        real_vector = preview_module._vector_ink_bounds
+
+        def fake_vector(font, text, cache=None):
+            if text == "\u0303":
+                return (0.0, -5.0, 8.0, 10.0)
+            return real_vector(font, text, cache)
+
+        monkeypatch.setattr(preview_module, "_vector_ink_bounds", fake_vector)
+        sentence = Sentence(singer_id="s", characters=[_mk("\u0303", [], cc=0)])
         preview = preview_module.KaraokePreview()
+        if preview._fm_current.horizontalAdvance("\u0303") > 0:
+            pytest.skip("当前字体给孤立 U+0303 正 advance，测不到零宽兜底")
         entry = _render_data(preview, sentence)
-        assert entry["char_widths"][0] >= 0  # 不崩即可（offscreen 下可能无字形）
-        assert abs(entry["char_ink_offsets"][0]) < 10000
+        assert entry["char_uses_ipa"] == [False]
+        assert entry["char_ink_offsets"][0] == 0.0
+        assert entry["char_ink_widths"][0] == 8.0
+        assert entry["char_widths"][0] == 10.0  # 墨水宽 + 2px 呼吸
+        assert entry["line_ink_top"] == -5.0
+        assert entry["line_ink_bottom"] == 5.0
 
     def test_line_ink_bounds_cached(self, qapp, monkeypatch):
         monkeypatch.setattr(preview_module, "theme", _DummyTheme())

@@ -3100,7 +3100,7 @@ class KaraokePreview(QWidget):
         has_ipa_styling = ipa_font is not None and ipa_font.families() != base_font.families()
 
         char_uses_ipa: list[bool] = [False] * n_chars
-        if has_ipa_styling and n_chars:
+        if n_chars:
             from strange_uta_game.backend.infrastructure.parsers.ipa import (
                 find_ipa_words,
             )
@@ -3115,6 +3115,9 @@ class KaraokePreview(QWidget):
                 if len(ch) > 1:
                     char_uses_ipa[ci] = True
 
+        # IPA/多码点簇的墨水判定与「是否真的换字体」解耦：即使主字体恰好
+        # 就是 IPA 字体（或无 IPA 字体可用、has_ipa_styling=False），附加符
+        # 仍必须用矢量墨水，否则 GPOS 标记会落在字体盒之外被裁掉。
         def _fm_for_char(ci: int) -> QFontMetrics:
             return fm_main_ipa if (has_ipa_styling and char_uses_ipa[ci]) else main_fm
 
@@ -3135,11 +3138,15 @@ class KaraokePreview(QWidget):
         char_ink_widths: list[float] = []
         char_advances: list[float] = []
         # 行墨水上下界（相对 y_center；在下方首遍循环内累计，缓存于 entry，
-        # paintEvent 不再每帧重算）
-        line_ink_top = -main_fm.ascent()
-        line_ink_bottom = main_fm.descent()
-        # 墨水用矢量轮廓（tightBoundingRect 在 Windows 上不计 GPOS 附加符）；
-        # 无矢量墨水（空白/无字形）回退 tightBoundingRect（含哨兵防护）
+        # paintEvent 不再每帧重算）。初值必须取「无墨水」哨兵，最后才回退
+        # 字体盒——否则普通假名行的墨水会被放大到 ascent/descent，节奏点、
+        # 打轴指示线、选区/hitbox 和分色色带随之整体偏移（非 IPA 回归）。
+        line_ink_top = float("inf")
+        line_ink_bottom = float("-inf")
+        has_line_ink = False
+        # IPA/多码点簇用矢量轮廓（tightBoundingRect 在 Windows 上不计
+        # GPOS 附加符）；其余普通歌词沿用 tightBoundingRect 的像素口径，
+        # 保证非 IPA 行的 wipe/注音几何与历史逐像素一致。
         for ci, ch in enumerate(chars):
             fm_ci = _fm_for_char(ci)
             font_ci = _font_for_char(ci)
@@ -3147,27 +3154,55 @@ class KaraokePreview(QWidget):
             adv = char_w
             if ch == ' ':
                 char_w = avg_char_w if fm_ci is main_fm else fm_ci.averageCharWidth()
-            ink = _vector_ink_bounds(font_ci, ch, self._vector_ink_cache)
+            use_vector = bool(char_uses_ipa[ci])
+            ink = (
+                _vector_ink_bounds(font_ci, ch, self._vector_ink_cache)
+                if use_vector
+                else None
+            )
+            # 非 IPA 的孤立零 advance 附加符（U+0303 等）没有可排版的
+            # tight 墨水，但矢量轮廓有；沿用 IPA 支持的兜底，避免变 0 宽
+            # 格子后与后字重叠。普通正 advance 字符不会走到这里。
+            if ink is None and char_w <= 0 and ch and not ch.isspace():
+                ink = _vector_ink_bounds(font_ci, ch, self._vector_ink_cache)
+            ink_top: Optional[float] = None
+            ink_bottom: Optional[float] = None
             if ink is not None:
                 ink_off, _ink_top, ink_w, _ink_h = ink
                 # 零 advance 但有墨水（Tahoma 式零宽重音符等）：以墨水宽度
                 # 作为格子宽，避免与后字重叠
                 if char_w <= 0 and ink_w > 0:
                     char_w = ink_w + 2
+                ink_top = _ink_top
+                ink_bottom = _ink_top + _ink_h  # QRectF 底边（不含）
             else:
                 ink_off, ink_w = _wipe_ink_bounds(fm_ci, ch)
+                if ch and not ch.isspace():
+                    _br = fm_ci.tightBoundingRect(ch)
+                    # 空矩形哨兵（无字形码点）与无高度退化盒不参与行墨水
+                    if (
+                        _br.height() > 0
+                        and _br.x() < 100000
+                        and _br.y() < 100000
+                    ):
+                        ink_top = _br.top()
+                        # QRect.bottom() 是含端像素，paintEvent 统一 +1，
+                        # 与历史 tightBoundingRect 行墨水口径一致
+                        ink_bottom = _br.bottom()
             char_widths.append(char_w)
             char_advances.append(adv)
             char_ink_offsets.append(ink_off)
             char_ink_widths.append(ink_w)
-            # 行墨水上下界在首遍循环内累计（审查反馈 #8：原二遍循环重复构造
-            # 矢量墨水缓存键，纯开销）
-            if ch and not ch.isspace() and ink is not None:
-                _ink_top_here, _ink_h_here = ink[1], ink[3]
-                if line_ink_top > _ink_top_here:
-                    line_ink_top = _ink_top_here
-                if line_ink_bottom < _ink_top_here + _ink_h_here:
-                    line_ink_bottom = _ink_top_here + _ink_h_here
+            if ink_top is not None and ink_bottom is not None:
+                has_line_ink = True
+                if line_ink_top > ink_top:
+                    line_ink_top = ink_top
+                if line_ink_bottom < ink_bottom:
+                    line_ink_bottom = ink_bottom
+        # 整行无可绘制墨水（空行/纯空白/孤立附加符）：回退字体盒
+        if not has_line_ink:
+            line_ink_top = -main_fm.ascent()
+            line_ink_bottom = main_fm.descent()
 
         # ---------- 连词组（仅用于视觉层，与 wipe 计算无关） ----------
         char_groups: list = []
@@ -3501,9 +3536,10 @@ class KaraokePreview(QWidget):
             char_part_anchors[ci] = gts + [int(seg_end_ts)]
 
         # ---------- Ruby 整串墨水边界缓存 ----------
-        # 单字符 ruby：以 ruby.text 整串的矢量墨水盒为准（含上下附加符——
-        # tightBoundingRect 在 Windows 上不计 GPOS 定位的附加符）
-        # 连词组 ruby：以组内所有 ruby.text 拼接后整串的墨水盒为准
+        # 单字符 ruby：ruby.text 整串的墨水盒；连词组 ruby：组内所有
+        # ruby.text 拼接后整串的墨水盒。IPA/多码点簇用矢量轮廓（含 GPOS
+        # 定位的附加符，tightBoundingRect 在 Windows 上会漏算），普通注音
+        # 沿用 tightBoundingRect 像素口径。
         # 返回 (ink_left, ink_width, ink_top, ink_bottom)——top/bottom 相对
         # 基线（负=上方），wipe 裁剪与连词框几何用；无墨水时为 (0,0,0,0)。
         char_ruby_ink: dict[int, tuple[float, float, float, float]] = {}
@@ -3514,13 +3550,28 @@ class KaraokePreview(QWidget):
 
         def _ruby_ink_bounds(text: str) -> tuple[float, float, float, float]:
             fm_txt = _fm_for_ruby_text(text)
-            font_txt = self._font_ruby_ipa if fm_txt is fm_ruby_ipa else self._font_ruby
-            ink = _vector_ink_bounds(font_txt, text, self._vector_ink_cache)
-            if ink is not None:
-                x, top, w, h = ink
-                return (x, w, top, top + h)
-            off, w = _ink_bounds(fm_txt, text)
-            return (off, w, 0.0, 0.0)
+            if fm_txt is fm_ruby_ipa:
+                # IPA 注音：矢量轮廓，含 GPOS 定位的上下附加符
+                font_txt = self._font_ruby_ipa
+                ink = _vector_ink_bounds(font_txt, text, self._vector_ink_cache)
+                if ink is not None:
+                    x, top, w, h = ink
+                    return (x, w, top, top + h)
+            # 非 IPA 注音：沿用历史 tightBoundingRect 像素口径
+            rect = fm_txt.tightBoundingRect(text)
+            if (
+                rect.width() <= 0
+                or rect.height() <= 0
+                or rect.x() >= 100000
+                or rect.y() >= 100000
+            ):
+                return (0.0, 0.0, 0.0, 0.0)
+            return (
+                float(rect.x()),
+                float(rect.width()),
+                float(rect.top()),
+                float(rect.bottom()),
+            )
 
         for ci, ch_obj in enumerate(characters):
             if ci in linked_leader_groups or ci in linked_non_leader:
@@ -3646,6 +3697,7 @@ class KaraokePreview(QWidget):
             "char_ink_widths": char_ink_widths,
             "char_advances": char_advances,
             "char_uses_ipa": char_uses_ipa,
+            "ipa_styling": has_ipa_styling,
             "line_ink_top": line_ink_top,
             "line_ink_bottom": line_ink_bottom,
             "end_sentence_w": end_sentence_w,
@@ -4064,8 +4116,10 @@ class KaraokePreview(QWidget):
 
             curr_x = start_x
 
-            # 本行所有非空白字符的实际墨水上下边界（缓存于 entry：矢量轮廓，
-            # 含 IPA 上下附加符；孤立附加符残段已由渲染数据侧的哨兵防护剔除）。
+            # 本行所有非空白字符的实际墨水上下边界（缓存于 entry：普通文本
+            # 用 tightBoundingRect 像素口径，IPA/多码点簇用矢量轮廓含上下
+            # 附加符；无字形码点的空矩形哨兵已剔除，零 advance 孤立附加符
+            # 由矢量墨水兜底计入，避免 0 宽格子）。
             # 用于分色渲染时统一色带分界线，使同行各字符的分色视觉位置一致。
             _line_ink_top = int(y_center + _rd["line_ink_top"])
             _line_ink_bottom = int(y_center + _rd["line_ink_bottom"]) + 1
@@ -4169,7 +4223,8 @@ class KaraokePreview(QWidget):
                         ruby_text_w = _fm_ruby_here.horizontalAdvance(_merged)
                         ruby_x = curr_x + (_grp_w - ruby_text_w) // 2
                         ruby_y = int(y_center - main_fm.ascent() - self._ruby_spacing)
-                        # Ruby 整串墨水边界（合并后整体矢量墨水盒，含上下附加符）：
+                        # Ruby 整串墨水边界（合并后整体墨水盒；普通注音为
+                        # tightBoundingRect 像素口径，IPA 为矢量轮廓）：
                         # wipe 按墨水起止点裁剪，不再扫过 ruby 首尾的透明侧 bearings。
                         _r_ink_off, _r_ink_w, _r_ink_top, _r_ink_bottom = _group_ruby_ink.get(
                             char_pos, (0, ruby_text_w, -_fm_ruby_here.ascent(), _fm_ruby_here.descent())
@@ -4319,7 +4374,8 @@ class KaraokePreview(QWidget):
                         ruby_text_w = _fm_ruby_here.horizontalAdvance(_ruby_disp)
                         ruby_x = curr_x + (char_w - ruby_text_w) // 2
                         ruby_y = int(y_center - main_fm.ascent() - self._ruby_spacing)
-                        # Ruby 文本整串墨水边界（矢量墨水，含上下附加符）
+                        # Ruby 文本整串墨水边界（普通注音 tight 像素口径，
+                        # IPA 矢量轮廓含上下附加符）
                         _r_ink_off, _r_ink_w, _r_ink_top, _r_ink_bottom = _char_ruby_ink.get(
                             char_pos,
                             (0, ruby_text_w, -_fm_ruby_here.ascent(), _fm_ruby_here.descent()),
@@ -4426,8 +4482,14 @@ class KaraokePreview(QWidget):
 
                 # 主文字 — 基于 checkpoint 的逐字 wipe
                 # IPA 段字符换用 IPA 字体（CJK 主字体对 IPA 的跨字体回退无法
-                # 锚定附加符）；度量同步切换
-                _char_is_ipa = bool(_char_uses_ipa and _char_uses_ipa[char_pos])
+                # 锚定附加符）；度量同步切换。仅当本行确实启用了独立 IPA
+                # 字体时才换字体——墨水矢量判定（char_uses_ipa）与字体切换
+                # 解耦，避免主字体==IPA 字体时绘制/度量口径不一致。
+                _char_is_ipa = bool(
+                    _char_uses_ipa
+                    and _char_uses_ipa[char_pos]
+                    and _rd.get("ipa_styling", False)
+                )
                 if _char_is_ipa:
                     _main_font_here = (
                         font_current_ipa if is_current else font_context_ipa
