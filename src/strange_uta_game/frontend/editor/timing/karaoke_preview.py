@@ -557,6 +557,11 @@ class KaraokePreview(QWidget):
     delete_chars_requested = pyqtSignal(int, int, int)
     delete_chars_multi_requested = pyqtSignal(int, int, int, int)  # start_line, start_char, end_line, end_char
     singer_change_multi_requested = pyqtSignal(int, int, int, int, str)  # start_line, start_char, end_line, end_char, singer_id
+    # 跨字符多选（Ctrl+左键）专用：
+    singer_change_ranges_requested = pyqtSignal(object, str)  # ranges, singer_id
+    selection_char_ranges_action = pyqtSignal(str, object)  # action, ranges
+    delete_selection_ranges_requested = pyqtSignal(object)  # ranges
+    selection_changed = pyqtSignal()  # 跨字符选区建立/变更/清除
     delete_timestamp_requested = pyqtSignal(int, int)
     insert_space_before_requested = pyqtSignal(int, int)
     insert_space_after_requested = pyqtSignal(int, int)
@@ -599,6 +604,24 @@ class KaraokePreview(QWidget):
         self._focus_line_range_end: int = -1
         self._focus_char_range_end: int = -1
         self._focus_dragging: bool = False
+
+        # 跨字符选区（Ctrl+左键）。None = 使用上面的单段焦点选区（原始行为，
+        # 单行/跨行划选都走这条路径）；非 None = 由若干不相邻字符组成的集合，
+        # 仅保存被选中的字符对象，供“不涉及字符增减”的批量操作使用。
+        self._ext_selection_chars: Optional[set[tuple[int, int]]] = None
+
+        # 扩展选区里“最后选中”的字符。C 类操作退出跨字符选区时保留它，
+        # 作为后续单字/单行操作的落点。
+        self._last_selected_char: Optional[tuple[int, int]] = None
+
+        # Ctrl+左键手势状态：按下时只记锚点，拖动中仅预览，松开才提交。
+        self._ctrl_sel_active: bool = False
+        self._ctrl_sel_anchor: Optional[tuple[int, int]] = None
+        self._ctrl_sel_extent: Optional[tuple[int, int]] = None
+        self._ctrl_sel_press_pos: Optional[tuple[int, int]] = None
+        self._ctrl_sel_moved: bool = False
+        # Ctrl+左键按在空白处：本次释放不触发普通单击逻辑
+        self._suppress_left_release: bool = False
 
         self._disable_click_jump: bool = False  # 禁用单击跳转
         self._disable_click_recenter: bool = False  # 禁用点击/双击时居中到目标行
@@ -919,6 +942,10 @@ class KaraokePreview(QWidget):
         self._focus_line_range_end = -1
         self._focus_char_range_end = -1
         self._focus_dragging = False
+        self._ext_selection_chars = None
+        self._last_selected_char = None
+        self._reset_ctrl_selection_gesture()
+        self._suppress_left_release = False
         if project and project.sentences:
             for idx, sentence in enumerate(project.sentences):
                 if sentence.characters:
@@ -940,6 +967,10 @@ class KaraokePreview(QWidget):
 
     def set_focus_position(self, line_idx:int = 0,char_idx: int = 0):
         # 用于打轴状态下更新foucs
+        # 焦点移动意味着用户已离开跨字符选区（点击/键盘/打轴推进/结构编辑），
+        # 扩展选区在此统一失效；原始单段选区仍按既有字段工作。
+        if self._ext_selection_chars is not None or self._ctrl_sel_active:
+            self.clear_extended_selection()
         new_line = float(line_idx)
         # 快路径：视口已居中且行/字符均未变化时仅刷新 focus 域
         # （行号对行号、字符号对字符号，此前曾错位比较导致 focus 行域残留旧值）
@@ -997,15 +1028,26 @@ class KaraokePreview(QWidget):
         self.request_repaint()
 
     def is_multi_line_selection(self) -> bool:
-        return (
-            self._focus_line_idx >= 0
-            and self._focus_char_idx >= 0
-            and self._focus_line_range_end >= 0
-            and self._focus_line_idx != self._focus_line_range_end
-        )
+        """原始单段选区是否跨行（扩展选区返回 False，见 is_extended_selection）。"""
+        sel = self._legacy_normalized_selection()
+        return sel is not None and sel[0] != sel[2]
+
+    def is_extended_selection(self) -> bool:
+        """是否存在 Ctrl 跨字符多选（与原始单段划选互斥）。"""
+        return self._ext_selection_chars is not None
 
     def get_normalized_selection(self):
-        """返回 (start_line, start_char, end_line, end_char) 闭区间，或 None。"""
+        """返回原始单段选区 (start_line, start_char, end_line, end_char) 闭区间，或 None。
+
+        扩展选区（Ctrl 多选）没有单段等价表示，返回 None；调用方应改用
+        :meth:`get_selected_char_ranges` / :meth:`get_selected_text`。
+        """
+        if self._ext_selection_chars is not None:
+            return None
+        return self._legacy_normalized_selection()
+
+    def _legacy_normalized_selection(self):
+        """原始单段选区的规范化结果（忽略扩展选区）。"""
         if self._focus_line_idx < 0 or self._focus_char_idx < 0 or self._focus_line_range_end < 0:
             return None
         if self._focus_line_idx < self._focus_line_range_end:
@@ -1026,6 +1068,456 @@ class KaraokePreview(QWidget):
             lo = min(self._focus_char_idx, self._focus_char_range_end)
             hi = max(self._focus_char_idx, self._focus_char_range_end)
             return (self._focus_line_idx, lo, self._focus_line_idx, hi)
+
+    # ── 跨字符多选（Ctrl+左键） ──────────────────────────────
+
+    def get_selected_char_ranges(self) -> list[tuple[int, int, int]]:
+        """当前选区的逐行闭区间 ``[(line_idx, start_char, end_char), ...]``。
+
+        - 原始单段选区：按行展开（跨行选区中间行整行选中），与原行为一致；
+        - Ctrl 扩展选区：返回所有被选中字符合并后的逐行连续段；
+        - 无选区：返回空列表（调用方按既有约定回退当前字符）。
+        """
+        if not self._project or not self._project.sentences:
+            return []
+        if self._ext_selection_chars is not None:
+            return self._coalesce_chars_to_spans(self._ext_selection_chars)
+        sel = self._legacy_normalized_selection()
+        if sel is None:
+            return []
+        return self._range_to_line_spans(*sel)
+
+    def get_selected_char_count(self) -> int:
+        """当前选区覆盖的字符对象总数。"""
+        return sum(e - s + 1 for _, s, e in self.get_selected_char_ranges())
+
+    def get_selected_text(self) -> str:
+        """当前选区覆盖的字符文本（按阅读顺序拼接，不含行分隔）。"""
+        if not self._project or not self._project.sentences:
+            return ""
+        parts: list[str] = []
+        for line_idx, start, end in self.get_selected_char_ranges():
+            if 0 <= line_idx < len(self._project.sentences):
+                chars = self._project.sentences[line_idx].characters
+                parts.extend(chars[i].char for i in range(start, end + 1))
+        return "".join(parts)
+
+    def selection_contains(self, line_idx: int, char_idx: int) -> bool:
+        """指定字符是否在当前选区内。"""
+        for li, start, end in self.get_selected_char_ranges():
+            if li == line_idx and start <= char_idx <= end:
+                return True
+        return False
+
+    def clear_extended_selection(self) -> bool:
+        """清除 Ctrl 扩展选区；返回是否确实清除了内容。
+
+        不清除 legacy 焦点光标：焦点仍是用户当前的编辑位置，只是不再有
+        跨字符选区高亮。
+        """
+        changed = self._ext_selection_chars is not None
+        self._ext_selection_chars = None
+        self._last_selected_char = None
+        self._reset_ctrl_selection_gesture()
+        if changed:
+            self.update()
+            self.selection_changed.emit()
+        return changed
+
+    def collapse_extended_selection_to_last(self) -> Optional[tuple[int, int]]:
+        """退出扩展选区，只保留“最后选中”的字符并返回它。
+
+        供 C 类操作（需要退化为普通单字/单行处理的操作）入口调用。
+        若最后选中记录失效，则回退到选区中阅读顺序最后的字符。
+        """
+        if self._ext_selection_chars is None:
+            return None
+        chars = set(self._ext_selection_chars)
+        target = self._last_selected_char
+        if target not in chars:
+            target = max(chars) if chars else None
+        self._ext_selection_chars = None
+        self._last_selected_char = None
+        self._reset_ctrl_selection_gesture()
+        if target is not None and self._project:
+            line_idx, char_idx = target
+            if 0 <= line_idx < len(self._project.sentences):
+                n = len(self._project.sentences[line_idx].characters)
+                if n:
+                    char_idx = max(0, min(char_idx, n - 1))
+                    self._set_legacy_selection_range(
+                        line_idx, char_idx, line_idx, char_idx
+                    )
+                    self.update()
+                    self.selection_changed.emit()
+                    return (line_idx, char_idx)
+        self.update()
+        self.selection_changed.emit()
+        return None
+
+    def collapse_extended_selection_to_char(
+        self, line_idx: int, char_idx: int
+    ) -> Optional[tuple[int, int]]:
+        """退出扩展选区，并把焦点落到指定字符（右键菜单目标）。"""
+        if self._ext_selection_chars is None:
+            return None
+        self._ext_selection_chars = None
+        self._last_selected_char = None
+        self._reset_ctrl_selection_gesture()
+        if not self._project or line_idx < 0 or line_idx >= len(self._project.sentences):
+            self.update()
+            self.selection_changed.emit()
+            return None
+        chars = self._project.sentences[line_idx].characters
+        if not chars:
+            self.update()
+            self.selection_changed.emit()
+            return None
+        char_idx = max(0, min(int(char_idx), len(chars) - 1))
+        self._set_legacy_selection_range(line_idx, char_idx, line_idx, char_idx)
+        self.update()
+        self.selection_changed.emit()
+        return (line_idx, char_idx)
+
+    def _collapse_extended_then_emit(
+        self, signal, target_line: int, target_char: int, *args
+    ) -> None:
+        """右键菜单 C 类操作：先退化为目标单字/单行，再走普通信号。"""
+        if self._ext_selection_chars is not None:
+            self.collapse_extended_selection_to_char(target_line, target_char)
+        signal.emit(*args)
+
+    def set_last_selected_char(self, line_idx: int, char_idx: int) -> None:
+        """记录扩展选区中“最后选中”的字符（供 C 类操作落点）。"""
+        self._last_selected_char = (int(line_idx), int(char_idx))
+
+    def _range_to_line_spans(
+        self, start_line: int, start_char: int, end_line: int, end_char: int
+    ) -> list[tuple[int, int, int]]:
+        """把单段跨行选区展开为逐行连续段（跳过空行，索引夹紧）。"""
+        if not self._project or not self._project.sentences:
+            return []
+        total = len(self._project.sentences)
+        start_line = max(0, min(int(start_line), total - 1))
+        end_line = max(0, min(int(end_line), total - 1))
+        if start_line > end_line:
+            start_line, end_line = end_line, start_line
+            start_char, end_char = end_char, start_char
+        spans: list[tuple[int, int, int]] = []
+        for line_idx in range(start_line, end_line + 1):
+            chars = self._project.sentences[line_idx].characters
+            if not chars:
+                continue
+            n = len(chars)
+            s = int(start_char) if line_idx == start_line else 0
+            e = int(end_char) if line_idx == end_line else n - 1
+            s = max(0, min(s, n - 1))
+            e = max(0, min(e, n - 1))
+            if s <= e:
+                spans.append((line_idx, s, e))
+        return spans
+
+    def _iter_range_chars(self, start_line: int, start_char: int, end_line: int, end_char: int):
+        """迭代单段范围覆盖的 (line_idx, char_idx)，逐行连续。"""
+        for line_idx, start, end in self._range_to_line_spans(
+            start_line, start_char, end_line, end_char
+        ):
+            for char_idx in range(start, end + 1):
+                yield line_idx, char_idx
+
+    def _coalesce_chars_to_spans(
+        self, chars: "set[tuple[int, int]]"
+    ) -> list[tuple[int, int, int]]:
+        """把字符集合合并为逐行连续闭区间列表（已排序）。"""
+        by_line: dict[int, list[int]] = {}
+        for line_idx, char_idx in chars:
+            by_line.setdefault(line_idx, []).append(char_idx)
+        spans: list[tuple[int, int, int]] = []
+        for line_idx in sorted(by_line):
+            if not self._project or line_idx < 0 or line_idx >= len(self._project.sentences):
+                continue
+            n = len(self._project.sentences[line_idx].characters)
+            cols = sorted({c for c in by_line[line_idx] if 0 <= c < n})
+            if not cols:
+                continue
+            start = end = cols[0]
+            for col in cols[1:]:
+                if col == end + 1:
+                    end = col
+                else:
+                    spans.append((line_idx, start, end))
+                    start = end = col
+            spans.append((line_idx, start, end))
+        return spans
+
+    def _simple_range_from_chars(
+        self, chars: "set[tuple[int, int]]"
+    ) -> Optional[tuple[int, int, int, int]]:
+        """若字符集合恰好等价于原始单段选区，返回其规范区间；否则 None。"""
+        spans = self._coalesce_chars_to_spans(chars)
+        if not spans or not self._project:
+            return None
+        if len(spans) == 1:
+            line_idx, start, end = spans[0]
+            return (line_idx, start, line_idx, end)
+        lines = [s[0] for s in spans]
+        if len(set(lines)) != len(lines):
+            # 同一行内出现多个不连续段 → 不是单段选区
+            return None
+        first, last = spans[0], spans[-1]
+        first_chars = self._project.sentences[first[0]].characters
+        last_chars = self._project.sentences[last[0]].characters
+        if not first_chars or first[2] != len(first_chars) - 1:
+            return None
+        if not last_chars or last[1] != 0:
+            return None
+        by_line = {line_idx: (s, e) for line_idx, s, e in spans}
+        for line_idx in range(first[0], last[0] + 1):
+            chars_here = self._project.sentences[line_idx].characters
+            if not chars_here:
+                continue
+            if line_idx not in by_line:
+                return None
+            s, e = by_line[line_idx]
+            if line_idx == first[0]:
+                if s != first[1] or e != len(chars_here) - 1:
+                    return None
+            elif line_idx == last[0]:
+                if s != 0 or e != last[2]:
+                    return None
+            elif s != 0 or e != len(chars_here) - 1:
+                return None
+        return (first[0], first[1], last[0], last[2])
+
+    def _set_legacy_selection_range(
+        self, start_line: int, start_char: int, end_line: int, end_char: int
+    ) -> None:
+        self._focus_line_idx = int(start_line)
+        self._focus_char_idx = int(start_char)
+        self._focus_line_range_end = int(end_line)
+        self._focus_char_range_end = int(end_char)
+        self._focus_dragging = False
+
+    def _extended_chars_for_update(self) -> "set[tuple[int, int]]":
+        """当前选区（原始或扩展）转成字符集合，供 Ctrl 手势增量修改。"""
+        if self._ext_selection_chars is not None:
+            return set(self._ext_selection_chars)
+        sel = self._legacy_normalized_selection()
+        if sel is None:
+            return set()
+        return set(self._iter_range_chars(*sel))
+
+    def _commit_extended_selection(
+        self, chars: "set[tuple[int, int]]", *, notify: bool = True
+    ) -> None:
+        """提交扩展选区集合；若它恰好构成单段选区，自动退化为原始选区。"""
+        self._ext_selection_chars = set(chars) if chars else None
+        if self._ext_selection_chars is not None:
+            simple = self._simple_range_from_chars(self._ext_selection_chars)
+            if simple is not None:
+                self._ext_selection_chars = None
+                self._set_legacy_selection_range(*simple)
+        if self._ext_selection_chars is None:
+            self._last_selected_char = None
+        if notify:
+            self.update()
+            self.selection_changed.emit()
+
+    def add_extended_selection_range(
+        self,
+        start_line: int,
+        start_char: int,
+        end_line: int,
+        end_char: int,
+        *,
+        active_char: Optional[tuple[int, int]] = None,
+    ) -> bool:
+        """把一段整字范围追加到 Ctrl 选区；返回选区是否发生变化。"""
+        chars = self._extended_chars_for_update()
+        new_chars = set(
+            self._iter_range_chars(start_line, start_char, end_line, end_char)
+        )
+        if not new_chars or new_chars <= chars:
+            return False
+        chars |= new_chars
+        self._commit_extended_selection(chars)
+        if self._ext_selection_chars is not None:
+            target = active_char
+            if target not in self._ext_selection_chars:
+                target = (end_line, end_char)
+            if target in self._ext_selection_chars:
+                self._last_selected_char = target
+            # 扩展选区没有单一范围；把焦点落在本次追加范围的落点，
+            # 让仍按 focus 取目标的旧路径至少指向选区内。
+            total = len(self._project.sentences) if self._project else 0
+            if total:
+                line_idx = max(0, min(int(start_line), total - 1))
+                n = len(self._project.sentences[line_idx].characters)
+                if n:
+                    char_idx = max(0, min(int(start_char), n - 1))
+                    self._focus_line_idx = line_idx
+                    self._focus_char_idx = char_idx
+                    self._focus_line_range_end = line_idx
+                    self._focus_char_range_end = char_idx
+        return True
+
+    def toggle_extended_selection_char(self, line_idx: int, char_idx: int) -> bool:
+        """切换一个字符对象的选中状态（Ctrl+单击）。返回选区是否变化。"""
+        if not self._project or line_idx < 0 or line_idx >= len(self._project.sentences):
+            return False
+        chars_here = self._project.sentences[line_idx].characters
+        if char_idx < 0 or char_idx >= len(chars_here):
+            return False
+        chars = self._extended_chars_for_update()
+        key = (line_idx, char_idx)
+        if key in chars:
+            chars.discard(key)
+            if chars:
+                keep_line, keep_char = min(chars)
+                self._focus_line_idx = keep_line
+                self._focus_char_idx = keep_char
+                self._focus_line_range_end = keep_line
+                self._focus_char_range_end = keep_char
+                if self._last_selected_char == key:
+                    self._last_selected_char = max(chars)
+            else:
+                self._focus_line_idx = -1
+                self._focus_char_idx = -1
+                self._focus_line_range_end = -1
+                self._focus_char_range_end = -1
+                self._last_selected_char = None
+        elif chars:
+            chars.add(key)
+            self._last_selected_char = key
+            self._focus_line_idx = line_idx
+            self._focus_char_idx = char_idx
+            self._focus_line_range_end = line_idx
+            self._focus_char_range_end = char_idx
+        else:
+            # 尚无选区：先建立单字符选区（原始路径即可）
+            self._focus_line_idx = line_idx
+            self._focus_char_idx = char_idx
+            self._focus_line_range_end = line_idx
+            self._focus_char_range_end = char_idx
+            self._last_selected_char = key
+            self._focus_dragging = False
+            self.update()
+            self.selection_changed.emit()
+            return True
+        self._commit_extended_selection(chars)
+        return True
+
+    def _ctrl_pending_chars(self) -> "set[tuple[int, int]]":
+        if not self._ctrl_sel_active or self._ctrl_sel_anchor is None:
+            return set()
+        anchor = self._ctrl_sel_anchor
+        extent = self._ctrl_sel_extent or anchor
+        if anchor[0] > extent[0] or (anchor[0] == extent[0] and anchor[1] > extent[1]):
+            anchor, extent = extent, anchor
+        return set(self._iter_range_chars(anchor[0], anchor[1], extent[0], extent[1]))
+
+    def _reset_ctrl_selection_gesture(self) -> None:
+        self._ctrl_sel_active = False
+        self._ctrl_sel_anchor = None
+        self._ctrl_sel_extent = None
+        self._ctrl_sel_press_pos = None
+        self._ctrl_sel_moved = False
+
+    def _char_at_position(self, x: int, y: int) -> Optional[tuple[int, int]]:
+        """把控件坐标映射到最近的字符对象（用于 Ctrl 手势，允许落在空白处）。"""
+        if not self._project or not self._project.sentences:
+            return None
+        for rect, line_idx, char_idx in self._char_hitboxes:
+            if rect.contains(x, y):
+                return line_idx, char_idx
+        nearest = self._find_nearest_hitbox(x, y)
+        if nearest:
+            return nearest[1], nearest[2]
+        h = self.height()
+        if h <= 0:
+            return None
+        line_height = h / max(1, self._visible_lines)
+        center_y = h / 2.0
+        total = len(self._project.sentences)
+        # 仅允许吸附到“当前绘制窗口内”的行：远离歌词区域（如顶部大片空白）
+        # 的 Ctrl 单击/拖动不应改选区；空行也不吸附到相邻行，避免误选。
+        half_visible = self._visible_lines / 2.0 + 1
+        first_visible = max(0, int(self._scroll_center_line - half_visible))
+        last_visible = min(total - 1, int(self._scroll_center_line + half_visible))
+        raw_line = int(round(self._scroll_center_line + (y - center_y) / line_height))
+        if raw_line < first_visible or raw_line > last_visible:
+            return None
+        by_line: dict[int, list[tuple[QRect, int]]] = {}
+        for rect, line_idx, char_idx in self._char_hitboxes:
+            by_line.setdefault(line_idx, []).append((rect, char_idx))
+        rects = by_line.get(raw_line)
+        if not rects:
+            return None
+
+        def _hdist(item):
+            rect = item[0]
+            if x < rect.left():
+                return rect.left() - x
+            if x > rect.right():
+                return x - rect.right()
+            return 0
+
+        rect, char_idx = min(rects, key=_hdist)
+        return raw_line, char_idx
+
+    def _begin_ctrl_selection(self, x: int, y: int) -> bool:
+        hit = self._char_at_position(x, y)
+        if hit is None:
+            return False
+        self._suppress_left_release = False
+        self._ctrl_sel_active = True
+        self._drag_scroll_timer.stop()
+        self._drag_scroll_direction = 0
+        self._ctrl_sel_anchor = hit
+        self._ctrl_sel_extent = hit
+        self._ctrl_sel_press_pos = (x, y)
+        self._ctrl_sel_moved = False
+        # Ctrl 点击不参与单击/双击链路
+        self._pending_click = None
+        self._press_pos = None
+        self._click_snapshot = None
+        self._click_timer.stop()
+        self._double_click_handled = False
+        self._focus_dragging = False
+        return True
+
+    def _finish_ctrl_selection(self, x: int, y: int) -> None:
+        anchor = self._ctrl_sel_anchor
+        extent = self._ctrl_sel_extent or anchor
+        press = self._ctrl_sel_press_pos
+        moved = self._ctrl_sel_moved
+        if press is not None:
+            dx = x - press[0]
+            dy = y - press[1]
+            if dx * dx + dy * dy > self._CLICK_MOVE_THRESHOLD * self._CLICK_MOVE_THRESHOLD:
+                moved = True
+        self._reset_ctrl_selection_gesture()
+        self._suppress_left_release = False
+        self._drag_scroll_timer.stop()
+        self._drag_scroll_direction = 0
+        if anchor is None:
+            return
+        if moved and extent is not None:
+            active_char = extent
+            if anchor[0] > extent[0] or (
+                anchor[0] == extent[0] and anchor[1] > extent[1]
+            ):
+                anchor, extent = extent, anchor
+            self.add_extended_selection_range(
+                anchor[0],
+                anchor[1],
+                extent[0],
+                extent[1],
+                active_char=active_char,
+            )
+        else:
+            self.toggle_extended_selection_char(anchor[0], anchor[1])
+        self.update()
 
     def _scroll_to_line(self, line_idx: int):
         """纯视觉滚动：将指定行移到视口中央，不改变 _current_line_idx（编辑光标）。
@@ -1823,6 +2315,23 @@ class KaraokePreview(QWidget):
 
     # ---- 点击 ----
 
+    def focusOutEvent(self, a0=None):
+        """失焦时取消未完成的 Ctrl 手势（弹出菜单/切换窗口会抢走鼠标释放）。"""
+        if self._ctrl_sel_active:
+            self._reset_ctrl_selection_gesture()
+            self._drag_scroll_timer.stop()
+            self._drag_scroll_direction = 0
+            self.update()
+        super().focusOutEvent(a0)
+
+    def hideEvent(self, a0=None):
+        """隐藏时取消未完成的 Ctrl 手势。"""
+        if self._ctrl_sel_active:
+            self._reset_ctrl_selection_gesture()
+            self._drag_scroll_timer.stop()
+            self._drag_scroll_direction = 0
+        super().hideEvent(a0)
+
     def mousePressEvent(self, a0: Optional[QMouseEvent]):
         if not a0 or not self._project or not self._project.sentences:
             return
@@ -1833,8 +2342,35 @@ class KaraokePreview(QWidget):
 
         # 右键点击 → 打开上下文菜单
         if a0.button() == Qt.MouseButton.RightButton:
+            # 右键会抢走左键释放：先取消未完成的 Ctrl 手势，避免下次左键被误提交
+            self._suppress_left_release = False
+            if self._ctrl_sel_active:
+                self._reset_ctrl_selection_gesture()
+                self._drag_scroll_timer.stop()
+                self._drag_scroll_direction = 0
+                self.update()
             self._show_context_menu(a0.globalPosition().toPoint(), click_x, click_y)
             return
+
+        # Ctrl+左键：跨字符多选（点击切换单字 / 拖拽追加一段）。
+        # 不移动打轴光标、不参与单击/双击链路；空白处按下不改变已有选区。
+        if a0.modifiers() & Qt.KeyboardModifier.ControlModifier:
+            if self._begin_ctrl_selection(click_x, click_y):
+                self.update()
+            else:
+                # 空白处 Ctrl+左键：不改变已有选区，也不触发普通单击
+                self._suppress_left_release = True
+            return
+
+        # 普通左键按下：离开跨字符多选，恢复原始单段划选行为。
+        # 同时取消可能残留的 Ctrl 手势（例如上一下左键释放被弹出菜单抢走）。
+        self._suppress_left_release = False
+        if self._ctrl_sel_active:
+            self._reset_ctrl_selection_gesture()
+            self._drag_scroll_timer.stop()
+            self._drag_scroll_direction = 0
+        if self._ext_selection_chars is not None:
+            self.clear_extended_selection()
 
         # 记录按下位置，用于像素级防抖判断
         self._press_pos = (click_x, click_y)
@@ -1930,6 +2466,21 @@ class KaraokePreview(QWidget):
         move_y = int(a0.position().y())
         self._drag_scroll_mouse_y = move_y
 
+        # Ctrl 跨字符多选：拖动只更新预览范围，松开时才提交。
+        if self._ctrl_sel_active:
+            press = self._ctrl_sel_press_pos
+            if press is not None:
+                dx = move_x - press[0]
+                dy = move_y - press[1]
+                if dx * dx + dy * dy > self._CLICK_MOVE_THRESHOLD * self._CLICK_MOVE_THRESHOLD:
+                    self._ctrl_sel_moved = True
+            hit = self._char_at_position(move_x, move_y)
+            if hit is not None and hit != self._ctrl_sel_extent:
+                self._ctrl_sel_extent = hit
+                self.update()
+            self._update_drag_autoscroll(move_y)
+            return
+
         # 像素级防抖：移动超过阈值时清除待处理点击（说明用户是划词而非单击）
         if self._press_pos is not None and self._pending_click is not None:
             dx = move_x - self._press_pos[0]
@@ -1950,7 +2501,10 @@ class KaraokePreview(QWidget):
         if hit:
             self.update()
 
-        # 边缘自动滚动
+        self._update_drag_autoscroll(move_y)
+
+    def _update_drag_autoscroll(self, move_y: int) -> None:
+        """拖拽到预览上下边缘时启动/停止自动滚动（划词与 Ctrl 多选共用）。"""
         h = self.height()
         SCROLL_ZONE = 36
         new_dir = 0
@@ -1969,7 +2523,7 @@ class KaraokePreview(QWidget):
 
     def _on_drag_scroll_tick(self):
         """拖拽边缘滚动：超出越多滚动越快。"""
-        if not self._focus_dragging or self._drag_scroll_direction == 0:
+        if (not self._focus_dragging and not self._ctrl_sel_active) or self._drag_scroll_direction == 0:
             self._drag_scroll_timer.stop()
             return
         h = self.height()
@@ -1993,6 +2547,18 @@ class KaraokePreview(QWidget):
     def mouseReleaseEvent(self, a0: Optional[QMouseEvent]):
         """鼠标释放 → 结束划词，或触发单击"""
         if not a0 or a0.button() != Qt.MouseButton.LeftButton:
+            return
+
+        # Ctrl+左键手势：松开才提交（单击切换 / 拖拽追加），不触发普通单击
+        if self._ctrl_sel_active:
+            self._finish_ctrl_selection(
+                int(a0.position().x()), int(a0.position().y())
+            )
+            return
+        if self._suppress_left_release:
+            self._suppress_left_release = False
+            self._pending_click = None
+            self._press_pos = None
             return
 
         self._focus_dragging = False
@@ -2126,10 +2692,27 @@ class KaraokePreview(QWidget):
         if sentence.characters and target_char_idx >= len(sentence.characters):
             target_char_idx = len(sentence.characters) - 1
 
-        norm_sel = self.get_normalized_selection()
+        # 右键落在跨字符选区之外：收起旧选区，把焦点移到目标字符，
+        # 菜单按常规单字/单段选区语义工作（与常见 UI 行为一致）。
+        if self.is_extended_selection() and not self.selection_contains(
+            target_line_idx, target_char_idx
+        ):
+            self.clear_extended_selection()
+            self._focus_line_idx = target_line_idx
+            self._focus_char_idx = target_char_idx
+            self._focus_line_range_end = target_line_idx
+            self._focus_char_range_end = target_char_idx
+
+        extended = self.is_extended_selection()
+        ext_ranges = self.get_selected_char_ranges() if extended else []
+        norm_sel = None if extended else self.get_normalized_selection()
         multi_line = norm_sel is not None and norm_sel[0] != norm_sel[2]
+        sel_start = target_char_idx
+        sel_end = target_char_idx
         in_selection = False
-        if norm_sel is not None:
+        if extended:
+            in_selection = self.selection_contains(target_line_idx, target_char_idx)
+        elif norm_sel is not None:
             sel_start = norm_sel[1]
             sel_end = norm_sel[3]
             if multi_line:
@@ -2139,16 +2722,22 @@ class KaraokePreview(QWidget):
                     target_line_idx == norm_sel[0]
                     and sel_start <= target_char_idx <= sel_end
                 )
-        else:
-            sel_start = target_char_idx
-            sel_end = target_char_idx
 
         delete_start = sel_start if in_selection else target_char_idx
         delete_end = sel_end + 1 if in_selection else target_char_idx + 1
+        ext_scope = extended and in_selection
 
         menu = RoundMenu(parent=self)
 
-        if multi_line and in_selection:
+        if ext_scope:
+            delete_action = Action(self.tr("删除字符"), menu)
+            delete_action.triggered.connect(
+                lambda checked=False: self.delete_selection_ranges_requested.emit(
+                    list(ext_ranges)
+                )
+            )
+            menu.addAction(delete_action)
+        elif multi_line and in_selection:
             _dl_sl, _dl_sc, _dl_el, _dl_ec = norm_sel
             delete_action = Action(self.tr("删除字符"), menu)
             delete_action.triggered.connect(
@@ -2166,26 +2755,41 @@ class KaraokePreview(QWidget):
             )
             menu.addAction(delete_action)
 
-        delete_timestamp = Action(self.tr("删除当前时间戳并回滚"), menu)
-        delete_timestamp.triggered.connect(
-            lambda checked=False: self.delete_timestamp_requested.emit(
-                target_line_idx, target_char_idx
+        if ext_scope:
+            delete_timestamp = Action(self.tr("删除所选范围时间戳"), menu)
+            delete_timestamp.triggered.connect(
+                lambda checked=False: self.selection_char_ranges_action.emit(
+                    "clear_timestamps", list(ext_ranges)
+                )
             )
-        )
+        else:
+            delete_timestamp = Action(self.tr("删除当前时间戳并回滚"), menu)
+            delete_timestamp.triggered.connect(
+                lambda checked=False: self.delete_timestamp_requested.emit(
+                    target_line_idx, target_char_idx
+                )
+            )
         menu.addAction(delete_timestamp)
 
         insert_space_before_action = Action(self.tr("在此前插入空格"), menu)
         insert_space_before_action.triggered.connect(
-            lambda checked=False: self.insert_space_before_requested.emit(
-                target_line_idx, target_char_idx
+            lambda checked=False: self._collapse_extended_then_emit(
+                self.insert_space_before_requested,
+                target_line_idx,
+                target_char_idx,
+                target_line_idx,
+                target_char_idx,
             )
         )
         menu.addAction(insert_space_before_action)
-
         insert_space_after_action = Action(self.tr("在此后插入空格"), menu)
         insert_space_after_action.triggered.connect(
-            lambda checked=False: self.insert_space_after_requested.emit(
-                target_line_idx, target_char_idx
+            lambda checked=False: self._collapse_extended_then_emit(
+                self.insert_space_after_requested,
+                target_line_idx,
+                target_char_idx,
+                target_line_idx,
+                target_char_idx,
             )
         )
         menu.addAction(insert_space_after_action)
@@ -2194,63 +2798,122 @@ class KaraokePreview(QWidget):
         merge_up_action = Action(self.tr("合并上一行"), menu)
         merge_up_action.setEnabled(target_line_idx > 0)
         merge_up_action.triggered.connect(
-            lambda checked=False: self.merge_line_up_requested.emit(target_line_idx)
+            lambda checked=False: self._collapse_extended_then_emit(
+                self.merge_line_up_requested,
+                target_line_idx,
+                target_char_idx,
+                target_line_idx,
+            )
         )
         menu.addAction(merge_up_action)
 
         delete_line_action = Action(self.tr("删除本行"), menu)
         delete_line_action.triggered.connect(
-            lambda checked=False: self.delete_line_requested.emit(target_line_idx)
+            lambda checked=False: self._collapse_extended_then_emit(
+                self.delete_line_requested,
+                target_line_idx,
+                target_char_idx,
+                target_line_idx,
+            )
         )
         menu.addAction(delete_line_action)
 
         insert_blank_line_before_action = Action(self.tr("在此前插入空行"), menu)
         insert_blank_line_before_action.triggered.connect(
-            lambda checked=False: self.insert_blank_line_before_requested.emit(target_line_idx)
+            lambda checked=False: self._collapse_extended_then_emit(
+                self.insert_blank_line_before_requested,
+                target_line_idx,
+                target_char_idx,
+                target_line_idx,
+            )
         )
         menu.addAction(insert_blank_line_before_action)
 
         insert_blank_line_after_action = Action(self.tr("在此后插入空行"), menu)
         insert_blank_line_after_action.triggered.connect(
-            lambda checked=False: self.insert_blank_line_requested.emit(target_line_idx)
+            lambda checked=False: self._collapse_extended_then_emit(
+                self.insert_blank_line_requested,
+                target_line_idx,
+                target_char_idx,
+                target_line_idx,
+            )
         )
         menu.addAction(insert_blank_line_after_action)
         menu.addSeparator()
 
         add_checkpoint_action = Action(self.tr("增加节奏点"), menu)
-        add_checkpoint_action.triggered.connect(
-            lambda checked=False: self.add_checkpoint_requested.emit(
-                target_line_idx, target_char_idx
-            )
-        )
-        menu.addAction(add_checkpoint_action)
-
         remove_checkpoint_action = Action(self.tr("减少节奏点"), menu)
-        remove_checkpoint_action.triggered.connect(
-            lambda checked=False: self.remove_checkpoint_requested.emit(
-                target_line_idx, target_char_idx
-            )
-        )
-        menu.addAction(remove_checkpoint_action)
-
         toggle_sentence_end_action = Action(self.tr("设置/取消停顿点"), menu)
-        toggle_sentence_end_action.triggered.connect(
-            lambda checked=False: self.toggle_sentence_end_requested.emit(
-                target_line_idx, target_char_idx
-            )
-        )
-        menu.addAction(toggle_sentence_end_action)
-
         toggle_needs_guide_action = Action(self.tr("标记/取消导唱待办"), menu)
-        toggle_needs_guide_action.triggered.connect(
-            lambda checked=False: self.toggle_needs_guide_requested.emit(
-                target_line_idx, target_char_idx
+        if ext_scope:
+            add_checkpoint_action.triggered.connect(
+                lambda checked=False: self.selection_char_ranges_action.emit(
+                    "add_checkpoint", list(ext_ranges)
+                )
             )
-        )
+            remove_checkpoint_action.triggered.connect(
+                lambda checked=False: self.selection_char_ranges_action.emit(
+                    "remove_checkpoint", list(ext_ranges)
+                )
+            )
+            toggle_sentence_end_action.triggered.connect(
+                lambda checked=False: self.selection_char_ranges_action.emit(
+                    "toggle_sentence_end", list(ext_ranges)
+                )
+            )
+            toggle_needs_guide_action.triggered.connect(
+                lambda checked=False: self.selection_char_ranges_action.emit(
+                    "toggle_needs_guide", list(ext_ranges)
+                )
+            )
+        else:
+            add_checkpoint_action.triggered.connect(
+                lambda checked=False: self.add_checkpoint_requested.emit(
+                    target_line_idx, target_char_idx
+                )
+            )
+            remove_checkpoint_action.triggered.connect(
+                lambda checked=False: self.remove_checkpoint_requested.emit(
+                    target_line_idx, target_char_idx
+                )
+            )
+            toggle_sentence_end_action.triggered.connect(
+                lambda checked=False: self.toggle_sentence_end_requested.emit(
+                    target_line_idx, target_char_idx
+                )
+            )
+            toggle_needs_guide_action.triggered.connect(
+                lambda checked=False: self.toggle_needs_guide_requested.emit(
+                    target_line_idx, target_char_idx
+                )
+            )
+        menu.addAction(add_checkpoint_action)
+        menu.addAction(remove_checkpoint_action)
+        menu.addAction(toggle_sentence_end_action)
         menu.addAction(toggle_needs_guide_action)
         menu.addSeparator()
 
-        if multi_line and in_selection:
+        if ext_scope:
+            singer_menu = RoundMenu(self.tr("设置演唱者"), self)
+            default_singer = self._project.get_default_singer()
+            default_action = Action(self.tr("默认演唱者"), singer_menu)
+            default_action.triggered.connect(
+                lambda checked=False, sid=default_singer.id: self.singer_change_ranges_requested.emit(
+                    list(ext_ranges), sid
+                )
+            )
+            singer_menu.addAction(default_action)
+            singer_menu.addSeparator()
+            for singer in self._project.singers:
+                action = Action(singer.name, singer_menu)
+                action.triggered.connect(
+                    lambda checked=False, sid=singer.id: self.singer_change_ranges_requested.emit(
+                        list(ext_ranges), sid
+                    )
+                )
+                singer_menu.addAction(action)
+            menu.addMenu(singer_menu)
+        elif multi_line and in_selection:
             _dl_sl, _dl_sc, _dl_el, _dl_ec = norm_sel
             singer_menu = RoundMenu(self.tr("设置演唱者"), self)
             default_singer = self._project.get_default_singer()
@@ -3001,6 +3664,10 @@ class KaraokePreview(QWidget):
         click_x = int(a0.position().x())
         click_y = int(a0.position().y())
 
+        # Ctrl+左键属于跨字符多选手势，不参与双击跳转
+        if a0.modifiers() & Qt.KeyboardModifier.ControlModifier:
+            return
+
         # 双击时停止单击定时器
         self._click_timer.stop()
         # 标记双击已处理，防止随后的 Release #2 触发单击逻辑（Qt 双击序列：
@@ -3180,7 +3847,18 @@ class KaraokePreview(QWidget):
         effective_current = self._effective_current_line()
 
         _norm_sel = self.get_normalized_selection() if self._focus_char_idx >= 0 else None
-        _draw_focus_selection = (
+        _ext_sel_set: Optional[set[tuple[int, int]]] = None
+        if self._ext_selection_chars is not None:
+            _ext_sel_set = set(self._ext_selection_chars)
+            if self._ctrl_sel_active:
+                _ext_sel_set |= self._ctrl_pending_chars()
+        elif self._ctrl_sel_active:
+            # Ctrl 拖拽期间仍显示原有单段选区，松开时才并入扩展选区
+            _ext_sel_set = self._ctrl_pending_chars()
+            _legacy_sel = self._legacy_normalized_selection()
+            if _legacy_sel is not None:
+                _ext_sel_set |= set(self._iter_range_chars(*_legacy_sel))
+        _draw_focus_selection = bool(_ext_sel_set) or (
             _norm_sel is not None
             and (_norm_sel[0] != _norm_sel[2] or _norm_sel[1] != _norm_sel[3])
         )
@@ -3348,20 +4026,24 @@ class KaraokePreview(QWidget):
 
                 # 隐藏模式下仅当存在跨字符多选时绘制 focus 高亮（拖选结束仍保持）
                 _show_sel = (not self._hide_hitbox_highlights) or _draw_focus_selection
-                if _show_sel and _norm_sel is not None:
+                _char_selected = False
+                if _ext_sel_set is not None:
+                    _char_selected = (idx, char_pos) in _ext_sel_set
+                elif _show_sel and _norm_sel is not None:
                     _sl, _sc, _el, _ec = _norm_sel
                     if _sl <= idx <= _el:
                         _lo = _sc if idx == _sl else 0
                         _hi = _ec if idx == _el else len(line.chars) - 1
-                        if _lo <= char_pos <= _hi:
-                            sel_bg = theme.karaoke_selection_bg
-                            sel_rect = QRect(
-                                int(curr_x) - 1,
-                                _rect_top,
-                                int(char_w) + 2,
-                                _rect_height,
-                            )
-                            painter.fillRect(sel_rect, sel_bg)
+                        _char_selected = _lo <= char_pos <= _hi
+                if _show_sel and _char_selected:
+                    sel_bg = theme.karaoke_selection_bg
+                    sel_rect = QRect(
+                        int(curr_x) - 1,
+                        _rect_top,
+                        int(char_w) + 2,
+                        _rect_height,
+                    )
+                    painter.fillRect(sel_rect, sel_bg)
 
                 # 连词组 non-leader：fillRect 可能覆盖 leader 那一轮画的 ruby 框的
                 # 右半段 outline，这里查表重绘恢复。leader 自己不需要重绘（它本轮的
@@ -3455,9 +4137,9 @@ class KaraokePreview(QWidget):
                                 painter.setClipRect(
                                     QRect(
                                         int(_r_ink_x),
-                                                int(ruby_y + _r_ink_top) - 2,
+                                        int(ruby_y + _r_ink_top) - 2,
                                         _rww,
-                                                int(_r_ink_bottom - _r_ink_top) + 4,
+                                        int(_r_ink_bottom - _r_ink_top) + 4,
                                     )
                                 )
                                 _draw_split_text(
@@ -3489,9 +4171,9 @@ class KaraokePreview(QWidget):
                                         painter.setClipRect(
                                             QRect(
                                                 int(_r_ink_x),
-                                        int(ruby_y + _r_ink_top) - 2,
+                                                int(ruby_y + _r_ink_top) - 2,
                                                 _rww,
-                                        int(_r_ink_bottom - _r_ink_top) + 4,
+                                                int(_r_ink_bottom - _r_ink_top) + 4,
                                             )
                                         )
                                         _draw_split_text(
@@ -3622,9 +4304,9 @@ class KaraokePreview(QWidget):
                                     painter.setClipRect(
                                         QRect(
                                             int(_r_ink_x),
-                                                int(ruby_y + _r_ink_top) - 2,
+                                            int(ruby_y + _r_ink_top) - 2,
                                             r_wipe_w,
-                                                int(_r_ink_bottom - _r_ink_top) + 4,
+                                            int(_r_ink_bottom - _r_ink_top) + 4,
                                         )
                                     )
                                     _draw_split_text(
@@ -3656,9 +4338,9 @@ class KaraokePreview(QWidget):
                                         painter.setClipRect(
                                             QRect(
                                                 int(_r_ink_x),
-                                            int(ruby_y + _r_ink_top) - 2,
+                                                int(ruby_y + _r_ink_top) - 2,
                                                 r_wipe_w,
-                                            int(_r_ink_bottom - _r_ink_top) + 4,
+                                                int(_r_ink_bottom - _r_ink_top) + 4,
                                             )
                                         )
                                         _draw_split_text(

@@ -1764,14 +1764,14 @@ class ApplySingerDialog(QDialog):
 
     apply_requested = pyqtSignal(str)  # singer_id
 
-    def __init__(self, char_text: str, current_singers: list[Singer], all_singers: list[Singer], parent=None):
+    def __init__(self, char_text: str, current_singers: list[Singer], all_singers: list[Singer], parent=None, selection_note: str = ""):
         super().__init__(parent)
         self._current_singers = current_singers
         self._all_singers = all_singers
         self._selected_singer_id = None
 
         self.setWindowTitle(self.tr("应用演唱者"))
-        fit_to_screen(self, 400, 500)
+        fit_to_screen(self, 400, 560 if selection_note else 500)
         self.setFont(ui_font(10))
 
         layout = QVBoxLayout(self)
@@ -1781,6 +1781,13 @@ class ApplySingerDialog(QDialog):
         lbl_char = QLabel(char_text)
         lbl_char.setStyleSheet("font-size: 16px; font-weight: bold;")
         form.addRow(self.tr("选中字符:"), lbl_char)
+
+        # Ctrl 跨字符多选：补充选区范围说明（单段选区保持原对话框不变）
+        if selection_note:
+            lbl_scope = QLabel(selection_note)
+            lbl_scope.setStyleSheet("font-size: 11px;")
+            lbl_scope.setWordWrap(True)
+            form.addRow(self.tr("选区:"), lbl_scope)
 
         # 第二行：当前演唱者信息
         if current_singers:

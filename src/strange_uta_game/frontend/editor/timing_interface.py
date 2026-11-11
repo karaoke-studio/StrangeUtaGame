@@ -596,6 +596,13 @@ class EditorInterface(QWidget):
         self.preview.delete_chars_requested.connect(self._on_delete_chars_requested)
         self.preview.delete_chars_multi_requested.connect(self._on_delete_chars_multi_requested)
         self.preview.singer_change_multi_requested.connect(self._on_singer_change_multi_requested)
+        self.preview.singer_change_ranges_requested.connect(self._on_apply_singer_ranges)
+        self.preview.selection_char_ranges_action.connect(
+            self._on_selection_char_ranges_action
+        )
+        self.preview.delete_selection_ranges_requested.connect(
+            self._on_delete_selection_ranges
+        )
         self.preview.delete_timestamp_requested.connect(self._on_delete_timestamp_requested)
         self.preview.insert_space_before_requested.connect(
             self._on_insert_space_before_requested
@@ -687,6 +694,8 @@ class EditorInterface(QWidget):
         # 行号/字符/时间戳信息（#5：从打轴栏移到此处，与播放状态一同显示）
         self.lbl_line_info = QLabel(self.tr("当前行: -"))
         status.addWidget(self.lbl_line_info)
+        # 跨字符选区变化时刷新状态栏的「已选 N 字」提示
+        self.preview.selection_changed.connect(self._update_line_info)
         status.addStretch()
         self.lbl_progress = QLabel(self.tr("行: 0/0 | 进度: 0%"))
         status.addWidget(self.lbl_progress)
@@ -1450,6 +1459,9 @@ class EditorInterface(QWidget):
     def set_project(self, project: Project):
         previous_project = self._project
         self._project = project
+        # 项目替换后，之前捕获的“调整所选字符原始时间戳”选区不再有效
+        self._adjust_ts_selected_ranges = []
+        self._adjust_ts_selected_shape = None
         # 支持“先导入音频，再创建/导入歌词”的工作流。首次设置项目或调用方
         # 显式标记继承音频（加载歌词替换无歌词项目时音频跟随带入）时，音频
         # 引擎会被保留，因此也要把引擎中的真实时长带入新项目。
@@ -1680,6 +1692,9 @@ class EditorInterface(QWidget):
         """
         if not self._project:
             return
+        self._collapse_extended_selection_for_action(
+            self.tr("粘贴字符"), notify=False
+        )
 
         from strange_uta_game.backend.infrastructure.parsers.annotated_text import (
             parse_timed_line,
@@ -1816,6 +1831,10 @@ class EditorInterface(QWidget):
         if not self._project:
             return
 
+        EditorInterface._collapse_extended_selection_for_action(
+            self, self.tr("复制字符"), notify=False
+        )
+
         id_to_name = {s.id: s.name for s in self._project.singers}
         offset = getattr(self._project, "global_offset_ms", 0) or 0
 
@@ -1915,6 +1934,9 @@ class EditorInterface(QWidget):
         """
         if not self._project:
             return
+        self._collapse_extended_selection_for_action(
+            self.tr("粘贴字符"), notify=False
+        )
 
         if (
             self.preview._focus_line_idx >= 0
@@ -2333,6 +2355,7 @@ class EditorInterface(QWidget):
         output_name = dlg.get_output_name()
         uniform_offset = dlg.get_uniform_offset()
 
+        self.preview.clear_extended_selection()
         self._launch_concat_worker(entries, output_name, uniform_offset)
 
     def _launch_concat_worker(
@@ -2848,6 +2871,7 @@ class EditorInterface(QWidget):
 
     def _on_bulk_change(self):
         """Ctrl+H — 打开批量変更对话框，自动填充当前焦点字符的连词或划选区域"""
+        self._collapse_extended_selection_for_action(self.tr("批量变更"))
         if self.preview.is_multi_line_selection():
             InfoBar.warning(
                 title=self.tr("暂不允许多行"),
@@ -2927,6 +2951,8 @@ class EditorInterface(QWidget):
             return
         if not isinstance(initial_state, dict):
             initial_state = None
+
+        self._collapse_extended_selection_for_action(self.tr("修改所选字符"))
 
         if self.preview.is_multi_line_selection():
             InfoBar.warning(
@@ -3037,6 +3063,8 @@ class EditorInterface(QWidget):
         """打开修改选中行对话框（复用行编辑界面的 LineDetailDialog）"""
         if not self._project:
             return
+        # 行详情可增删字符，离开前先清掉跨字符选区，避免索引失效
+        self.preview.clear_extended_selection()
 
         line_idx = self.preview._current_line_idx
         if line_idx < 0 or line_idx >= len(self._project.sentences):
@@ -3600,9 +3628,46 @@ class EditorInterface(QWidget):
             )
             return
 
+        # Ctrl 跨字符多选：对全部命中字符应用演唱者（不涉及字符增减）
+        if self._preview_has_extended_selection():
+            ranges = self.preview.get_selected_char_ranges()
+            if not ranges:
+                return
+            all_char_texts: list[str] = []
+            singer_ids = set()
+            for li, s, e in ranges:
+                if li < 0 or li >= len(self._project.sentences):
+                    continue
+                sentence = self._project.sentences[li]
+                for ci in range(s, e + 1):
+                    if 0 <= ci < len(sentence.characters):
+                        ch = sentence.characters[ci]
+                        all_char_texts.append(ch.char)
+                        if ch.singer_id:
+                            singer_ids.add(ch.singer_id)
+            char_text = "".join(all_char_texts)
+            if len(char_text) > 20:
+                char_text = char_text[:17] + "..."
+            singer_map = {s.id: s for s in self._project.singers}
+            current_singers = [singer_map[sid] for sid in singer_ids if sid in singer_map]
+            from .timing.dialogs import ApplySingerDialog
+            dlg = ApplySingerDialog(
+                char_text,
+                current_singers,
+                [s for s in self._project.singers if s.enabled],
+                self,
+                selection_note=self.tr("{segments} 段，共 {n} 字").format(
+                    segments=len(ranges), n=self.preview.get_selected_char_count()
+                ),
+            )
+            dlg.apply_requested.connect(
+                lambda singer_id: self._on_apply_singer_ranges(ranges, singer_id)
+            )
+            dlg.exec()
+            return
+
         line_idx = self._current_line_idx
         char_idx = self.preview._current_char_idx
-
         if line_idx < 0 or line_idx >= len(self._project.sentences):
             return
 
@@ -3786,6 +3851,223 @@ class EditorInterface(QWidget):
             parent=self,
         )
 
+    def _on_apply_singer_ranges(
+        self, ranges: list[tuple[int, int, int]], singer_id: str
+    ) -> None:
+        """Ctrl 跨字符多选：一次撤销、一次 InfoBar 应用演唱者。"""
+        if not self._project or not ranges:
+            return
+        # 注音分析期间禁止结构编辑；由该入口统一弹一条提示，避免再叠加
+        # “无变化” InfoBar（一个操作只允许一条 InfoBar）。
+        ruby_busy = getattr(self, "_ruby_analysis_in_progress", None)
+        if callable(ruby_busy) and ruby_busy():
+            self._reject_during_ruby_analysis()
+            return
+        project = self._project
+
+        def _mutate():
+            changed = False
+            for line_idx, start, end in ranges:
+                if line_idx < 0 or line_idx >= len(project.sentences):
+                    continue
+                sentence = project.sentences[line_idx]
+                if not sentence.characters:
+                    continue
+                start = max(0, start)
+                end = min(end, len(sentence.characters) - 1)
+                for char_idx in range(start, end + 1):
+                    ch = sentence.characters[char_idx]
+                    if ch.singer_id != singer_id:
+                        ch.singer_id = singer_id
+                        if ch.ruby:
+                            ch.push_to_ruby()
+                        changed = True
+                if start == 0 and end >= len(sentence.characters) - 1:
+                    if sentence.singer_id != singer_id:
+                        sentence.singer_id = singer_id
+                        changed = True
+            if not changed:
+                return None
+            first = ranges[0]
+            return (first[0], first[1], None, "singers")
+
+        ok = self._execute_structural_edit("应用演唱者", _mutate)
+        if not ok:
+            # 分析任务可能在对话框打开期间启动：_execute_structural_edit 已
+            # 弹过警告，这里不再叠“无变化”提示
+            if callable(ruby_busy) and ruby_busy():
+                return
+            InfoBar.info(
+                title=self.tr("无变化"),
+                content=self.tr("所选字符的演唱者未发生变化"),
+                orient=Qt.Orientation.Horizontal,
+                isClosable=True,
+                position=InfoBarPosition.TOP,
+                duration=2500,
+                parent=self,
+            )
+            return
+        InfoBar.success(
+            title=self.tr("设置完成"),
+            content=self.tr("已为选中字符设置演唱者"),
+            orient=Qt.Orientation.Horizontal,
+            isClosable=True,
+            position=InfoBarPosition.TOP,
+            duration=4000,
+            parent=self,
+        )
+
+    def _preview_has_extended_selection(self) -> bool:
+        """当前 preview 是否存在 Ctrl 跨字符多选（容忍测试替身缺该 API）。"""
+        checker = getattr(getattr(self, "preview", None), "is_extended_selection", None)
+        return bool(checker()) if callable(checker) else False
+
+    def _collapse_extended_selection_for_action(
+        self, action_label: str, *, notify: bool = True
+    ) -> Optional[tuple[int, int]]:
+        """C 类操作入口：退出跨字符选区，只保留最后选中的字符并继续。
+
+        返回保留的 (line_idx, char_idx)；若本来就不是扩展选区则返回 None。
+        ``notify=False`` 供自身会弹 InfoBar 的操作（复制/粘贴）使用，避免
+        一次操作出现两条 InfoBar。
+        """
+        checker = getattr(getattr(self, "preview", None), "is_extended_selection", None)
+        if not callable(checker) or not checker():
+            return None
+        collapse = getattr(
+            getattr(self, "preview", None), "collapse_extended_selection_to_last", None
+        )
+        target = collapse() if callable(collapse) else None
+        if target is not None:
+            # 让 current / timing_service 也落到保留字，后续按普通单字操作。
+            on_char_selected = getattr(self, "_on_char_selected", None)
+            if callable(on_char_selected):
+                on_char_selected(target[0], target[1])
+            self._current_line_idx = target[0]
+            if getattr(self, "preview", None) is not None:
+                self.preview._current_char_idx = target[1]
+        if notify:
+            tr = getattr(self, "tr", lambda source: source)
+            if target is not None:
+                target_text = tr("第 {line} 行 第 {char} 字").format(
+                    line=target[0] + 1, char=target[1] + 1
+                )
+                content = tr(
+                    "「{action}」已退出跨字符选区，只保留最后选中的字符：{target}。"
+                ).format(action=action_label, target=target_text)
+            else:
+                content = tr(
+                    "「{action}」已退出跨字符选区，按普通单字/单行继续。"
+                ).format(action=action_label)
+            InfoBar.info(
+                title=tr("已退出跨字符选区"),
+                content=content,
+                orient=Qt.Orientation.Horizontal,
+                isClosable=True,
+                position=InfoBarPosition.TOP,
+                duration=3000,
+                parent=self,
+            )
+        update_line_info = getattr(self, "_update_line_info", None)
+        if callable(update_line_info):
+            update_line_info()
+        return target
+    def _on_selection_char_ranges_action(self, action: str, ranges) -> None:
+        """对 Ctrl 跨字符选区执行逐字动作（一次撤销、至多一条 InfoBar）。
+
+        仅用于“不增删字符对象”的操作；增删字符的入口在别处拦截。
+        """
+        if not self._project or not ranges:
+            return
+        ruby_busy = getattr(self, "_ruby_analysis_in_progress", None)
+        if callable(ruby_busy) and ruby_busy():
+            self._reject_during_ruby_analysis()
+            return
+        project = self._project
+        first_line, first_char = ranges[0][0], ranges[0][1]
+
+        def _iter_chars():
+            for line_idx, start, end in ranges:
+                if line_idx < 0 or line_idx >= len(project.sentences):
+                    continue
+                sentence = project.sentences[line_idx]
+                for char_idx in range(max(0, start), min(end, len(sentence.characters) - 1) + 1):
+                    yield sentence, char_idx
+
+        if action == "clear_timestamps":
+            cleared_box = [0]
+
+            def _clear():
+                for sentence, char_idx in _iter_chars():
+                    ch = sentence.characters[char_idx]
+                    if ch.timestamps or ch.sentence_end_ts is not None:
+                        ch.clear_timestamps()
+                        cleared_box[0] += 1
+                if cleared_box[0] == 0:
+                    return None
+                return (first_line, first_char, None, "timetags")
+
+            if self._execute_structural_edit("删除所选范围时间戳", _clear):
+                InfoBar.success(
+                    title=self.tr("删除完成"),
+                    content=self.tr("已删除 {n} 个字符的时间戳").format(
+                        n=cleared_box[0]
+                    ),
+                    orient=Qt.Orientation.Horizontal,
+                    isClosable=True,
+                    position=InfoBarPosition.TOP,
+                    duration=3000,
+                    parent=self,
+                )
+            else:
+                if callable(ruby_busy) and ruby_busy():
+                    return
+                InfoBar.info(
+                    title=self.tr("无时间戳"),
+                    content=self.tr("所选字符没有需要删除的时间戳"),
+                    orient=Qt.Orientation.Horizontal,
+                    isClosable=True,
+                    position=InfoBarPosition.TOP,
+                    duration=3000,
+                    parent=self,
+                )
+            return
+
+        def _mutate():
+            if action == "add_checkpoint":
+                from .timing.dialogs import _get_ruby_split_mode
+
+                mode = _get_ruby_split_mode()
+                for sentence, char_idx in _iter_chars():
+                    sentence.add_checkpoint(char_idx, ruby_split_mode=mode)
+                return (first_line, first_char, 0, "checkpoints")
+            if action == "remove_checkpoint":
+                for sentence, char_idx in _iter_chars():
+                    sentence.remove_checkpoint(char_idx, force=True)
+                return (first_line, first_char, 0, "checkpoints")
+            if action == "toggle_sentence_end":
+                for sentence, char_idx in _iter_chars():
+                    sentence.toggle_sentence_end(char_idx)
+                return (first_line, first_char, 0, "checkpoints")
+            if action == "convert_to_sentence_end":
+                for sentence, char_idx in _iter_chars():
+                    ch = sentence.characters[char_idx]
+                    ch.clear_timestamps()
+                    ch.set_check_count(0, force=True)
+                    if not ch.is_sentence_end:
+                        ch.is_sentence_end = True
+                return (first_line, first_char, 0, "checkpoints")
+            if action == "toggle_needs_guide":
+                for _sentence, char_idx in _iter_chars():
+                    ch = _sentence.characters[char_idx]
+                    ch.needs_guide = not ch.needs_guide
+                return (first_line, first_char, None, "lyrics")
+            return None
+
+        self._execute_structural_edit(
+            "跨字符选区操作", _mutate, move_cp=(action != "toggle_needs_guide")
+        )
+
     def _on_singer_manager_clicked(self):
         """工具栏「演唱者管理」入口。
 
@@ -3822,6 +4104,8 @@ class EditorInterface(QWidget):
         """
         if not self._project:
             return
+
+        self._collapse_extended_selection_for_action(self.tr("插入导唱符"))
 
         line_idx, char_idx = self._resolve_target_char()
         if line_idx < 0 or line_idx >= len(self._project.sentences):
@@ -4190,6 +4474,8 @@ class EditorInterface(QWidget):
         dlg = AutoGenerateInterludeGuideDialog(self)
         if dlg.exec() != QDialog.DialogCode.Accepted or not dlg.was_apply_clicked():
             return
+        # 自动插入导唱符会增删字符，提交前清掉旧跨字符选区
+        self.preview.clear_extended_selection()
 
         min_guide_time_s = dlg.get_min_guide_time_s()
         format_str = dlg.get_format()
@@ -4300,6 +4586,8 @@ class EditorInterface(QWidget):
                 parent=self,
             )
             return
+        # 自动导唱会批量增删字符，打开工具前先清空跨字符选区
+        self.preview.clear_extended_selection()
         try:
             if self._auto_guide_dialog is not None and self._auto_guide_dialog.isVisible():
                 self._auto_guide_dialog.raise_()
@@ -4596,6 +4884,7 @@ class EditorInterface(QWidget):
         from .timing.dialogs import AdjustRawTimestampDialog
 
         self._adjust_ts_selected_ranges = ranges
+        self._adjust_ts_selected_shape = self._selection_structure_shape()
         scope_label = self._format_selected_scope_label(ranges)
         if not hasattr(self, "_adjust_ts_sel_dlg") or self._adjust_ts_sel_dlg is None or not self._adjust_ts_sel_dlg.isVisible():
             self._adjust_ts_sel_dlg = AdjustRawTimestampDialog(self, scope="selected", scope_label=scope_label)
@@ -4610,10 +4899,15 @@ class EditorInterface(QWidget):
     def _collect_selected_char_ranges(self) -> list[tuple[int, int, int]]:
         """收集当前选中字符的 (line_idx, start_char, end_char) 闭区间列表。
 
-        支持跨行选择；若无明确选择，则使用当前光标所在单字符。
+        支持跨行选择；Ctrl 跨字符多选返回其逐行分段；若无明确选择，
+        则使用当前光标所在单字符。
         """
         if not self._project:
             return []
+
+        # Ctrl 跨字符多选：选区本身已是“若干不相邻段”，直接按段返回。
+        if self._preview_has_extended_selection():
+            return self.preview.get_selected_char_ranges()
 
         ranges: list[tuple[int, int, int]] = []
 
@@ -4657,9 +4951,33 @@ class EditorInterface(QWidget):
         ranges.append((line_idx, start_idx, end_idx))
         return ranges
 
+    def _selection_structure_shape(self):
+        """项目行数 + 每行字符数快照，用于校验延迟应用的选区是否仍有效。"""
+        if not self._project:
+            return None
+        return (
+            len(self._project.sentences),
+            tuple(len(sentence.characters) for sentence in self._project.sentences),
+        )
+
     def _format_selected_scope_label(self, ranges: list[tuple[int, int, int]]) -> str:
         if not ranges:
             return self.tr("所选字符")
+        if self._preview_has_extended_selection():
+            total = sum(e - s + 1 for _, s, e in ranges)
+            if len(ranges) <= 3:
+                parts = []
+                for li, s, e in ranges:
+                    if s == e:
+                        parts.append(self.tr("第 {line} 行 第 {char} 字").format(
+                            line=li + 1, char=s + 1))
+                    else:
+                        parts.append(self.tr("第 {line} 行 第 {s}-{e} 字").format(
+                            line=li + 1, s=s + 1, e=e + 1))
+                return self.tr("跨字符选区：{parts}（共 {total} 字）").format(
+                    parts=self.tr("、").join(parts), total=total)
+            return self.tr("跨字符选区：{segments} 段，共 {total} 字").format(
+                segments=len(ranges), total=total)
         if len(ranges) == 1:
             li, s, e = ranges[0]
             if s == e:
@@ -4679,6 +4997,23 @@ class EditorInterface(QWidget):
         if not ranges:
             if hasattr(self, "_adjust_ts_sel_dlg") and self._adjust_ts_sel_dlg is not None:
                 self._adjust_ts_sel_dlg.set_status(self.tr("选区已失效"), success=False)
+            return
+
+        shape = getattr(self, "_adjust_ts_selected_shape", None)
+        if shape is not None and shape != self._selection_structure_shape():
+            self._adjust_ts_selected_ranges = []
+            self._adjust_ts_selected_shape = None
+            if hasattr(self, "_adjust_ts_sel_dlg") and self._adjust_ts_sel_dlg is not None:
+                self._adjust_ts_sel_dlg.set_status(self.tr("选区已失效"), success=False)
+            InfoBar.warning(
+                title=self.tr("选区已失效"),
+                content=self.tr("项目结构已改变，请重新选择要调整的字符"),
+                orient=Qt.Orientation.Horizontal,
+                isClosable=True,
+                position=InfoBarPosition.TOP,
+                duration=3000,
+                parent=self,
+            )
             return
 
         project = self._project
@@ -4877,6 +5212,12 @@ class EditorInterface(QWidget):
             )
             return
 
+        # 分析期间结构编辑会被 _execute_structural_edit 拒绝并弹一条警告；
+        # 这里提前返回，避免再叠加“无时间戳”（一个操作一条 InfoBar）。
+        if self._ruby_analysis_in_progress():
+            self._reject_during_ruby_analysis()
+            return
+
         project = self._project
 
         def _mutate():
@@ -4895,7 +5236,6 @@ class EditorInterface(QWidget):
             if cleared == 0:
                 return None
             return (self._current_line_idx, self.preview._current_char_idx, None, "timetags")
-
         scope_label = self._format_selected_scope_label(ranges)
         ok = self._execute_structural_edit("删除所选范围时间戳", _mutate)
         if ok:
@@ -4909,6 +5249,8 @@ class EditorInterface(QWidget):
                 parent=self,
             )
         else:
+            if self._ruby_analysis_in_progress():
+                return
             InfoBar.info(
                 title=self.tr("无时间戳"),
                 content=self.tr("{scope} 没有需要删除的时间戳").format(scope=scope_label),
@@ -6543,7 +6885,15 @@ class EditorInterface(QWidget):
 
     def _on_char_edit_requested(self, line_idx: int, char_idx: int):
         """F2: show the configured compact or classic ruby editor."""
-        if not self._project or not 0 <= line_idx < len(self._project.sentences):
+        if not self._project:
+            return
+        edit_label = self.tr("编辑字符") if hasattr(self, "tr") else "编辑字符"
+        target = EditorInterface._collapse_extended_selection_for_action(
+            self, edit_label, notify=True
+        )
+        if target is not None:
+            line_idx, char_idx = target
+        if not 0 <= line_idx < len(self._project.sentences):
             return
         sentence = self._project.sentences[line_idx]
         if not 0 <= char_idx < len(sentence.chars):
@@ -6883,6 +7233,7 @@ class EditorInterface(QWidget):
         """
         if not self._project or not self._timing_service:
             return
+        self._collapse_extended_selection_for_action(self.tr("微调时间戳"))
         if not self._timing_service.adjust_current_timestamp(delta_ms):
             return
         self._update_time_tags_display()
@@ -6907,6 +7258,7 @@ class EditorInterface(QWidget):
         """
         if not self._project or not self._timing_service:
             return
+        self.preview.clear_extended_selection()
         # 优先用选中字符
         if (
             self.preview._focus_line_idx >= 0
@@ -7169,6 +7521,7 @@ class EditorInterface(QWidget):
     def _insert_line_break_at_current(self):
         if not self._project:
             return
+        self._collapse_extended_selection_for_action(self.tr("断行"))
         line_idx, char_idx = self._resolve_target_char()
         if line_idx < 0 or line_idx >= len(self._project.sentences):
             return
@@ -7189,6 +7542,9 @@ class EditorInterface(QWidget):
 
     def _delete_current_selection_or_char(self):
         if not self._project:
+            return
+        if self._preview_has_extended_selection():
+            self._on_delete_selection_ranges(self.preview.get_selected_char_ranges())
             return
 
         # Del 仅在编辑模式触发（keyPressEvent 路由）。focus 域为真理：
@@ -7237,6 +7593,11 @@ class EditorInterface(QWidget):
     def _toggle_sentence_end_at_current(self):
         if not self._project:
             return
+        if self._preview_has_extended_selection():
+            self._on_selection_char_ranges_action(
+                "toggle_sentence_end", self.preview.get_selected_char_ranges()
+            )
+            return
         # `.` (编辑模式) / F4 (打轴模式) 共用入口；目标字符由 `_resolve_target_char()`
         # 按模式分流：编辑模式 focus 优先，打轴模式 current。
         line_idx, char_idx = self._resolve_target_char()
@@ -7257,6 +7618,11 @@ class EditorInterface(QWidget):
     def _convert_timestamps_to_sentence_end(self):
         """取消当前字符所有节奏点、清除时间戳并标记为停顿点。"""
         if not self._project:
+            return
+        if self._preview_has_extended_selection():
+            self._on_selection_char_ranges_action(
+                "convert_to_sentence_end", self.preview.get_selected_char_ranges()
+            )
             return
         line_idx, char_idx = self._resolve_target_char()
         if line_idx < 0 or line_idx >= len(self._project.sentences):
@@ -7301,6 +7667,25 @@ class EditorInterface(QWidget):
             char.clear_timestamps()
             char.set_check_count(0, force=True)
             char.is_sentence_end = False
+
+        # Ctrl 跨字符多选：逐段清除，一次撤销
+        if self._preview_has_extended_selection():
+            ranges = self.preview.get_selected_char_ranges()
+            if not ranges:
+                return
+
+            def _mutate_ext():
+                for line_idx, start, end in ranges:
+                    if line_idx < 0 or line_idx >= len(self._project.sentences):
+                        continue
+                    sentence = self._project.sentences[line_idx]
+                    for ch_idx in range(max(0, start), min(end, len(sentence.characters) - 1) + 1):
+                        _clear_one(line_idx, ch_idx)
+                first = ranges[0]
+                return first[0], first[1], 0, "checkpoints"
+
+            self._execute_structural_edit("清除所有节奏点", _mutate_ext)
+            return
 
         # 多行选区：清除选区内每一行的字符
         if self.preview.is_multi_line_selection():
@@ -7361,6 +7746,12 @@ class EditorInterface(QWidget):
         """
         if not self._project:
             return
+        if self._preview_has_extended_selection():
+            action = "add_checkpoint" if delta > 0 else "remove_checkpoint"
+            self._on_selection_char_ranges_action(
+                action, self.preview.get_selected_char_ranges()
+            )
+            return
         line_idx, char_idx = self._resolve_target_char()
         if line_idx < 0 or line_idx >= len(self._project.sentences):
             return
@@ -7392,6 +7783,11 @@ class EditorInterface(QWidget):
         """
         if not self._project:
             return
+        if self._preview_has_extended_selection():
+            self._on_selection_char_ranges_action(
+                "toggle_sentence_end", self.preview.get_selected_char_ranges()
+            )
+            return
         line_idx, char_idx = self._resolve_target_char()
         if line_idx < 0 or line_idx >= len(self._project.sentences):
             return
@@ -7417,6 +7813,9 @@ class EditorInterface(QWidget):
         linked_to_next 都置为 False。
         """
         if not self._project:
+            return
+        if self._preview_has_extended_selection():
+            self._toggle_word_join_ranges(self.preview.get_selected_char_ranges())
             return
 
         if self.preview.is_multi_line_selection():
@@ -7546,6 +7945,72 @@ class EditorInterface(QWidget):
             parent=self,
         )
 
+    def _toggle_word_join_ranges(self, ranges) -> None:
+        """跨字符选区连词：按每个连续段分别沿用快速连词/取消连词语义。"""
+        if not self._project or not ranges:
+            return
+        if self._ruby_analysis_in_progress():
+            self._reject_during_ruby_analysis()
+            return
+        project = self._project
+        decisions: list[tuple[int, int, int, bool]] = []
+        for line_idx, start, end in ranges:
+            if line_idx < 0 or line_idx >= len(project.sentences):
+                continue
+            chars = project.sentences[line_idx].characters
+            if not chars:
+                continue
+            start = max(0, min(int(start), len(chars) - 1))
+            end = max(0, min(int(end), len(chars) - 1))
+            if start > end:
+                continue
+            if start == end:
+                # 单字段不能“向后连词”，只允许取消已有连词；
+                # 行末字符没有下一个字，跳过。
+                if start >= len(chars) - 1:
+                    continue
+                decisions.append((line_idx, start, end, not chars[start].linked_to_next))
+            else:
+                link = all(not c.linked_to_next for c in chars[start : end + 1])
+                decisions.append((line_idx, start, end, link))
+        if not decisions:
+            return
+
+        def _mutate():
+            for line_idx, start, end, link_value in decisions:
+                if line_idx < 0 or line_idx >= len(project.sentences):
+                    continue
+                chars = project.sentences[line_idx].characters
+                if start == end:
+                    if 0 <= start < len(chars):
+                        chars[start].linked_to_next = link_value
+                elif link_value:
+                    for ci in range(start, end):
+                        if 0 <= ci < len(chars):
+                            chars[ci].linked_to_next = True
+                else:
+                    for ci in range(start, end + 1):
+                        if 0 <= ci < len(chars):
+                            chars[ci].linked_to_next = False
+            first = decisions[0]
+            return (first[0], first[1], 0, "checkpoints")
+
+        linked = sum(1 for decision in decisions if decision[3])
+        unlinked = len(decisions) - linked
+        if not self._execute_structural_edit("连词", _mutate, move_cp=False):
+            return
+        InfoBar.success(
+            title=self.tr("连词已更新"),
+            content=self.tr(
+                "已处理 {n} 段选区（{linked} 段设为连词，{unlinked} 段取消连词）"
+            ).format(n=len(decisions), linked=linked, unlinked=unlinked),
+            orient=Qt.Orientation.Horizontal,
+            isClosable=True,
+            position=InfoBarPosition.TOP,
+            duration=2500,
+            parent=self,
+        )
+
     def _on_nav_line(self, delta: int):
         """方向键导航：上一行 (delta=-1) 或下一行 (delta=+1)。
 
@@ -7559,6 +8024,7 @@ class EditorInterface(QWidget):
         """
         if not self._project or not self._timing_service:
             return
+        self.preview.clear_extended_selection()
         sentences = self._project.sentences
 
         # playing = bool(self._timing_service.is_playing())
@@ -7644,6 +8110,7 @@ class EditorInterface(QWidget):
         """
         if not self._project or not self._timing_service:
             return
+        self.preview.clear_extended_selection()
         sentences = self._project.sentences
         # focus 域作为真理来源；focus 无效则回退 current 一次
         if self.preview._focus_line_idx >= 0 and self.preview._focus_char_idx >= 0:
@@ -7910,7 +8377,61 @@ class EditorInterface(QWidget):
         # 同步 focus 字符到 cp 对应的字符
         self.preview.set_focus_position(line_idx, char_idx)
 
+    def _on_delete_selection_ranges(self, ranges) -> None:
+        """删除跨字符选区覆盖的全部字符（一次撤销、一条 InfoBar）。"""
+        if not self._project or not ranges:
+            return
+        if self._ruby_analysis_in_progress():
+            self._reject_during_ruby_analysis()
+            return
+        project = self._project
+        grouped: dict[int, set[int]] = {}
+        for line_idx, start, end in ranges:
+            if line_idx < 0 or line_idx >= len(project.sentences):
+                continue
+            chars = project.sentences[line_idx].characters
+            if not chars:
+                continue
+            start = max(0, min(int(start), len(chars) - 1))
+            end = max(0, min(int(end), len(chars) - 1))
+            if start <= end:
+                grouped.setdefault(line_idx, set()).update(range(start, end + 1))
+        if not grouped:
+            return
+        first_line = min(grouped)
+        first_char = min(grouped[first_line])
+        deleted_box = [0]
+
+        def _mutate():
+            for line_idx in sorted(grouped, reverse=True):
+                if line_idx < 0 or line_idx >= len(project.sentences):
+                    continue
+                sentence = project.sentences[line_idx]
+                for char_idx in sorted(grouped[line_idx], reverse=True):
+                    if 0 <= char_idx < len(sentence.characters):
+                        sentence.delete_character(char_idx)
+                        deleted_box[0] += 1
+                if not sentence.characters:
+                    project.delete_line(line_idx)
+            if deleted_box[0] == 0:
+                return None
+            return (first_line, first_char, 0, "lyrics")
+
+        if self._execute_structural_edit("删除字符", _mutate, move_cp=False):
+            InfoBar.success(
+                title=self.tr("删除完成"),
+                content=self.tr("已删除 {n} 个字符").format(n=deleted_box[0]),
+                orient=Qt.Orientation.Horizontal,
+                isClosable=True,
+                position=InfoBarPosition.TOP,
+                duration=3000,
+                parent=self,
+            )
+
     def _on_delete_chars_requested(self, line_idx: int, start: int, end: int):
+        if self._preview_has_extended_selection():
+            self._on_delete_selection_ranges(self.preview.get_selected_char_ranges())
+            return
         self._execute_structural_edit(
             "删除字符",
             lambda: self._delete_char_range(line_idx, start, end),
@@ -7918,6 +8439,9 @@ class EditorInterface(QWidget):
         )
 
     def _on_delete_chars_multi_requested(self, start_line: int, start_char: int, end_line: int, end_char: int):
+        if self._preview_has_extended_selection():
+            self._on_delete_selection_ranges(self.preview.get_selected_char_ranges())
+            return
         def _mutate():
             for line_idx in range(end_line, start_line - 1, -1):
                 if line_idx < 0 or line_idx >= len(self._project.sentences):
@@ -8013,7 +8537,12 @@ class EditorInterface(QWidget):
                 self._on_seek(seek_ms)
 
     def _on_insert_space_before_requested(self, line_idx: int, char_idx: int):
-        if not self._project or line_idx < 0 or line_idx >= len(self._project.sentences):
+        if not self._project:
+            return
+        target = self._collapse_extended_selection_for_action(self.tr("插入空格"))
+        if target is not None:
+            line_idx, char_idx = target
+        if line_idx < 0 or line_idx >= len(self._project.sentences):
             return
         project = self._project
 
@@ -8038,7 +8567,12 @@ class EditorInterface(QWidget):
         self._execute_structural_edit("在前插入空格", _mutate, move_cp=False)
 
     def _on_insert_space_after_requested(self, line_idx: int, char_idx: int):
-        if not self._project or line_idx < 0 or line_idx >= len(self._project.sentences):
+        if not self._project:
+            return
+        target = self._collapse_extended_selection_for_action(self.tr("插入空格"))
+        if target is not None:
+            line_idx, char_idx = target
+        if line_idx < 0 or line_idx >= len(self._project.sentences):
             return
         project = self._project
 
@@ -8066,6 +8600,7 @@ class EditorInterface(QWidget):
         """在当前字符后插入空格（快捷键入口）。"""
         if not self._project:
             return
+        self._collapse_extended_selection_for_action(self.tr("插入空格"))
         line_idx, char_idx = self._resolve_target_char()
         if line_idx < 0 or line_idx >= len(self._project.sentences):
             return
@@ -8094,6 +8629,7 @@ class EditorInterface(QWidget):
         """将当前行合并到上一行（快捷键触发）。"""
         if not self._project:
             return
+        self._collapse_extended_selection_for_action(self.tr("合并上一行"))
         line_idx = self._current_line_idx
         if line_idx <= 0 or line_idx >= len(self._project.sentences):
             return
@@ -8102,6 +8638,9 @@ class EditorInterface(QWidget):
     def _on_merge_line_up_requested(self, line_idx: int):
         if not self._project:
             return
+        target = self._collapse_extended_selection_for_action(self.tr("合并上一行"))
+        if target is not None:
+            line_idx = target[0]
         project = self._project
         self._execute_structural_edit(
             "合并上一行",
@@ -8119,7 +8658,12 @@ class EditorInterface(QWidget):
         )
 
     def _on_delete_line_requested(self, line_idx: int):
-        if not self._project or line_idx < 0 or line_idx >= len(self._project.sentences):
+        if not self._project:
+            return
+        target = self._collapse_extended_selection_for_action(self.tr("删除本行"))
+        if target is not None:
+            line_idx = target[0]
+        if line_idx < 0 or line_idx >= len(self._project.sentences):
             return
         project = self._project
 
@@ -8135,6 +8679,9 @@ class EditorInterface(QWidget):
     def _on_insert_blank_line_before_requested(self, line_idx: int):
         if not self._project:
             return
+        target = self._collapse_extended_selection_for_action(self.tr("插入空行"))
+        if target is not None:
+            line_idx = target[0]
         project = self._project
 
         singer_id = ""
@@ -8152,6 +8699,9 @@ class EditorInterface(QWidget):
     def _on_insert_blank_line_requested(self, line_idx: int):
         if not self._project:
             return
+        target = self._collapse_extended_selection_for_action(self.tr("插入空行"))
+        if target is not None:
+            line_idx = target[0]
         project = self._project
 
         singer_id = ""
@@ -8216,6 +8766,11 @@ class EditorInterface(QWidget):
     def _toggle_needs_guide(self):
         """快捷键触发：切换当前 focus 字符的导唱待办标记。"""
         if not self._project:
+            return
+        if self._preview_has_extended_selection():
+            self._on_selection_char_ranges_action(
+                "toggle_needs_guide", self.preview.get_selected_char_ranges()
+            )
             return
         line_idx, char_idx = self._resolve_target_char()
         if line_idx < 0:
@@ -8323,14 +8878,20 @@ class EditorInterface(QWidget):
         elif action == "toggle_waveform_spectrum":
             self._toggle_waveform_spectrum()
         elif action == "toggle_line_end":
-            if self._project:
+            if self._preview_has_extended_selection():
+                self._toggle_sentence_end_at_current()
+            elif self._project:
                 line_idx, char_idx = self._resolve_target_char()
                 if line_idx >= 0 and char_idx >= 0:
                     self.preview.toggle_sentence_end_requested.emit(line_idx, char_idx)
                 else:
                     self._toggle_sentence_end_at_current()
         elif action == "delete_timestamp":
-            if self._project:
+            if self._preview_has_extended_selection():
+                self._on_selection_char_ranges_action(
+                    "clear_timestamps", self.preview.get_selected_char_ranges()
+                )
+            elif self._project:
                 line_idx = self._current_line_idx
                 char_idx = self.preview._current_char_idx
                 self._on_delete_timestamp_requested(line_idx, char_idx)
@@ -9454,6 +10015,9 @@ class EditorInterface(QWidget):
                 else:
                     char_info = self.tr(" | 字 {n}/{total} | 「{ch}」 未打轴").format(
                         n=char_idx + 1, total=total_chars, ch=ch.char)
+            if self._preview_has_extended_selection():
+                sel_count = self.preview.get_selected_char_count()
+                char_info += self.tr(" | 已选 {n} 字（跨字符）").format(n=sel_count)
             self.lbl_line_info.setText(self.tr("行 {idx}/{total}: {preview}{char_info}").format(
                 idx=idx + 1, total=total, preview=preview, char_info=char_info))
         else:
@@ -10606,6 +11170,24 @@ class EditorInterface(QWidget):
 
         label = "注音分析所选字符" if update_checkpoints else "注音分析所选字符（仅注音）"
 
+        # Ctrl 跨字符多选：按逐行分段整批提交（一次快照 / 一条撤销命令）
+        if self._preview_has_extended_selection():
+            specs = []
+            for line_idx, start, end in self.preview.get_selected_char_ranges():
+                if line_idx < 0 or line_idx >= len(self._project.sentences):
+                    continue
+                sentence = self._project.sentences[line_idx]
+                if not sentence.characters:
+                    continue
+                specs.append(
+                    (line_idx, set(range(max(0, start), min(end, len(sentence.characters) - 1) + 1)))
+                )
+            if specs:
+                self._analyze_rubies_specs_async(
+                    specs, label, update_checkpoints=update_checkpoints
+                )
+            return
+
         # 跨行选中：收集每行的字符范围，整批提交（worker 内部逐行顺序分析）
         if self.preview.is_multi_line_selection():
             sel = self.preview.get_normalized_selection()
@@ -10853,3 +11435,5 @@ class EditorInterface(QWidget):
             self._store, self, current_line=line_idx, current_char=char_idx
         )
         dlg.exec()
+        # 全文本编辑可能增删字符，返回打轴页时清掉旧选区
+        self.preview.clear_extended_selection()
