@@ -83,7 +83,10 @@ def _ctrl_click(preview: KaraokePreview, line: int, char: int) -> None:
 
 
 def _select_char0_and_2(preview: KaraokePreview) -> None:
-    """Implicit focus is char (0,0); Ctrl+click char 2 yields {0,2}."""
+    """Ctrl+click char 0 (explicit first selection), then char 2."""
+    _ctrl_click(preview, 0, 0)
+    assert preview.is_extended_selection() is False
+    assert preview.get_normalized_selection() == (0, 0, 0, 0)
     _ctrl_click(preview, 0, 2)
     assert preview.is_extended_selection() is True
     assert preview.get_selected_char_ranges() == [(0, 0, 0), (0, 2, 2)]
@@ -111,20 +114,35 @@ def _plain_drag(preview: KaraokePreview, line: int, char: int, to_line: int, to_
 def test_ctrl_click_builds_scattered_selection(qapp):
     preview = _preview(qapp)
     try:
-        _ctrl_click(preview, 0, 0)  # toggles off the implicit focus
+        _ctrl_click(preview, 0, 0)  # first Ctrl+click starts an explicit selection
         assert preview.is_extended_selection() is False
-        assert preview.get_selected_char_ranges() == []
+        assert preview.get_selected_char_ranges() == [(0, 0, 0)]
 
         _ctrl_click(preview, 0, 2)
-        assert preview.is_extended_selection() is False
-        assert preview.get_selected_char_ranges() == [(0, 2, 2)]
+        assert preview.is_extended_selection() is True
+        assert preview.get_selected_char_ranges() == [(0, 0, 0), (0, 2, 2)]
 
         _ctrl_click(preview, 0, 4)
         assert preview.is_extended_selection() is True
-        assert preview.get_selected_char_ranges() == [(0, 2, 2), (0, 4, 4)]
-        assert preview.get_selected_char_count() == 2
-        assert preview.get_selected_text() == "\u3046\u304a"  # うお
+        assert preview.get_selected_char_ranges() == [
+            (0, 0, 0),
+            (0, 2, 2),
+            (0, 4, 4),
+        ]
+        assert preview.get_selected_char_count() == 3
+        assert preview.get_selected_text() == "\u3042\u3046\u304a"  # あうお
         assert preview.get_normalized_selection() is None
+    finally:
+        preview.close()
+
+
+def test_first_ctrl_drag_does_not_include_implicit_focus(qapp):
+    preview = _preview(qapp)
+    try:
+        _ctrl_drag(preview, 2, 1, 2, 2)
+        assert preview.is_extended_selection() is False
+        assert preview.get_normalized_selection() == (2, 1, 2, 2)
+        assert preview.get_selected_char_ranges() == [(2, 1, 2)]
     finally:
         preview.close()
 
@@ -141,6 +159,22 @@ def test_ctrl_click_toggles_selected_char_off(qapp):
         _ctrl_click(preview, 0, 0)  # last explicit char can be cleared
         assert preview.is_extended_selection() is False
         assert preview.get_selected_char_ranges() == []
+    finally:
+        preview.close()
+
+
+def test_ctrl_drag_same_char_still_toggles(qapp):
+    preview = _preview(qapp)
+    try:
+        _select_char0_and_2(preview)
+        rect = _rect(preview, 0, 2)
+        center = rect.center()
+        assert preview._begin_ctrl_selection(center.x(), center.y())
+        preview._ctrl_sel_moved = True
+        preview._ctrl_sel_extent = (0, 2)
+        preview._finish_ctrl_selection(center.x() + 7, center.y())
+        assert preview.is_extended_selection() is False
+        assert preview.get_selected_char_ranges() == [(0, 0, 0)]
     finally:
         preview.close()
 
@@ -166,9 +200,8 @@ def test_contiguous_ctrl_range_collapses_to_normal_selection(qapp):
     preview = _preview(qapp)
     try:
         # Build an explicit scattered set first, then bridge the gap with Ctrl+drag.
-        _ctrl_click(preview, 0, 0)  # clear implicit focus
-        _ctrl_click(preview, 0, 3)
         _ctrl_click(preview, 0, 0)
+        _ctrl_click(preview, 0, 3)
         assert preview.is_extended_selection() is True
         assert preview.get_selected_char_ranges() == [(0, 0, 0), (0, 3, 3)]
 
@@ -243,12 +276,14 @@ def test_focus_move_clears_extended_selection(qapp):
 def test_reversed_ctrl_drag_and_single_char_drag(qapp):
     preview = _preview(qapp)
     try:
+        _ctrl_click(preview, 0, 0)
         _ctrl_drag(preview, 0, 4, 0, 2)
         assert preview.is_extended_selection() is True
         assert preview.get_selected_char_ranges() == [(0, 0, 0), (0, 2, 4)]
 
         preview.clear_extended_selection()
         preview.set_focus_position(0, 0)
+        _ctrl_click(preview, 0, 0)
         _ctrl_drag(preview, 0, 2, 0, 2)
         assert preview.is_extended_selection() is True
         assert preview.get_selected_char_ranges() == [(0, 0, 0), (0, 2, 2)]
@@ -413,6 +448,7 @@ def _fake_editor(project: Project, preview: KaraokePreview):
         tr=lambda text: text,
         _preview_has_extended_selection=lambda: preview.is_extended_selection(),
         _ruby_analysis_in_progress=lambda: False,
+        _reject_during_ruby_analysis=lambda: False,
     )
 
 
@@ -477,6 +513,48 @@ def test_collapse_extended_selection_keeps_last_char_and_one_infobar(qapp, monke
         preview.close()
 
 
+def test_collapse_still_runs_for_non_structural_action_while_busy(qapp, monkeypatch):
+    project = _project()
+    preview = _preview(qapp, project)
+    infos = []
+    monkeypatch.setattr(
+        timing_module.InfoBar, "info", lambda **kwargs: infos.append(kwargs)
+    )
+    try:
+        _select_char0_and_2(preview)
+        editor = _fake_editor(project, preview)
+        editor._ruby_analysis_in_progress = lambda: True
+        target = EditorInterface._collapse_extended_selection_for_action(
+            editor, "\u6d4b\u8bd5", notify=True
+        )
+        assert target == (0, 2)
+        assert preview.is_extended_selection() is False
+        assert preview.get_normalized_selection() == (0, 2, 0, 2)
+        assert len(infos) == 1
+    finally:
+        preview.close()
+
+
+def test_busy_structural_handler_rejects_and_keeps_selection(qapp):
+    project = _project()
+    preview = _preview(qapp, project)
+    warnings = []
+    try:
+        _select_char0_and_2(preview)
+        before = [s.text for s in project.sentences]
+        editor = _fake_editor(project, preview)
+        editor._ruby_analysis_in_progress = lambda: True
+        editor._reject_during_ruby_analysis = (
+            lambda: warnings.append("busy") or True
+        )
+        EditorInterface._insert_space_at_current(editor)
+        assert preview.is_extended_selection() is True
+        assert [s.text for s in project.sentences] == before
+        assert warnings == ["busy"]
+    finally:
+        preview.close()
+
+
 def test_delete_selection_ranges_deletes_all_and_one_infobar(qapp, monkeypatch):
     project = _project()
     preview = _preview(qapp, project)
@@ -497,6 +575,33 @@ def test_delete_selection_ranges_deletes_all_and_one_infobar(qapp, monkeypatch):
         assert [c.char for c in project.sentences[2].characters] == list(
             "\u3055\u3059\u305b\u305d"
         )
+        assert len(successes) == 1
+    finally:
+        preview.close()
+
+
+def test_delete_selection_ranges_removes_emptied_lines(qapp, monkeypatch):
+    project = Project()
+    project.singers.clear()
+    singer = Singer(name="Default", is_default=True)
+    project.singers.append(singer)
+    for text in ("\u3042", "\u304b", "\u3055"):
+        project.add_sentence(_sentence(text, singer.id))
+    preview = _preview(qapp, project)
+    successes = []
+    monkeypatch.setattr(
+        timing_module.InfoBar, "success", lambda **kwargs: successes.append(kwargs)
+    )
+    try:
+        _ctrl_click(preview, 0, 0)
+        _ctrl_click(preview, 2, 0)
+        ranges = preview.get_selected_char_ranges()
+        assert ranges == [(0, 0, 0), (2, 0, 0)]
+        editor = _fake_editor(project, preview)
+        _patch_structural_edit(editor)
+        EditorInterface._on_delete_selection_ranges(editor, ranges)
+        assert len(project.sentences) == 1
+        assert project.sentences[0].text == "\u304b"
         assert len(successes) == 1
     finally:
         preview.close()
@@ -532,6 +637,29 @@ def test_word_join_ranges_links_and_unlinks_each_segment(qapp, monkeypatch):
             False,
             False,
         ]
+    finally:
+        preview.close()
+
+
+def test_word_join_single_char_never_links_outside_selection(qapp, monkeypatch):
+    project = _project()
+    preview = _preview(qapp, project)
+    successes = []
+    monkeypatch.setattr(
+        timing_module.InfoBar, "success", lambda **kwargs: successes.append(kwargs)
+    )
+    try:
+        chars = project.sentences[0].characters
+        chars[0].linked_to_next = False
+        chars[2].linked_to_next = True
+        editor = _fake_editor(project, preview)
+        _patch_structural_edit(editor)
+        EditorInterface._toggle_word_join_ranges(
+            editor, [(0, 0, 0), (0, 2, 2)]
+        )
+        assert chars[0].linked_to_next is False  # never link to unselected char 1
+        assert chars[2].linked_to_next is False  # only cancels existing link
+        assert len(successes) == 1
     finally:
         preview.close()
 
@@ -697,6 +825,7 @@ def test_delete_line_after_extended_selection_collapses_and_runs(qapp, monkeypat
         assert preview.is_extended_selection() is False
         assert preview.get_normalized_selection() == (0, 2, 0, 2)
         assert len(project.sentences) == 2
+        assert [s.text for s in project.sentences] == [LINE2, LINE3]
         assert len(infos) == 1
     finally:
         preview.close()
@@ -779,7 +908,7 @@ def test_context_menu_delete_char_emits_extended_ranges(qapp, monkeypatch):
         preview.close()
 
 
-def test_context_menu_line_delete_collapses_to_target_and_emits(qapp, monkeypatch):
+def test_context_menu_line_delete_uses_last_selected_not_target(qapp, monkeypatch):
     from strange_uta_game.frontend.editor.timing import (
         karaoke_preview as preview_module,
     )
@@ -792,15 +921,42 @@ def test_context_menu_line_delete_collapses_to_target_and_emits(qapp, monkeypatc
     preview.delete_line_requested.connect(emitted.append)
     try:
         _select_char0_and_2(preview)
-        rect = _rect(preview, 0, 2)
+        _ctrl_drag(preview, 2, 1, 2, 1)  # last selected char becomes (2, 1)
+        rect = _rect(preview, 0, 0)  # right-click a different selected char
         preview._show_context_menu(QPoint(10, 10), rect.center().x(), rect.center().y())
         action = next(
             a for a in factory.menus[0].actions if "\u5220\u9664\u672c\u884c" in a.text()
         )
         action.trigger()
         assert preview.is_extended_selection() is False
-        assert preview.get_normalized_selection() == (0, 2, 0, 2)
-        assert emitted == [0]
+        assert preview.get_normalized_selection() == (2, 1, 2, 1)
+        assert emitted == [2]
+    finally:
+        preview.close()
+
+
+def test_context_menu_c_action_guard_keeps_selection(qapp, monkeypatch):
+    from strange_uta_game.frontend.editor.timing import (
+        karaoke_preview as preview_module,
+    )
+
+    project = _project()
+    preview = _preview(qapp, project)
+    factory = _SpyMenuFactory()
+    monkeypatch.setattr(preview_module, "RoundMenu", factory)
+    emitted = []
+    preview.delete_line_requested.connect(emitted.append)
+    try:
+        _select_char0_and_2(preview)
+        preview._c_class_action_guard = lambda: False
+        rect = _rect(preview, 0, 0)
+        preview._show_context_menu(QPoint(10, 10), rect.center().x(), rect.center().y())
+        action = next(
+            a for a in factory.menus[0].actions if "\u5220\u9664\u672c\u884c" in a.text()
+        )
+        action.trigger()
+        assert emitted == []
+        assert preview.is_extended_selection() is True
     finally:
         preview.close()
 

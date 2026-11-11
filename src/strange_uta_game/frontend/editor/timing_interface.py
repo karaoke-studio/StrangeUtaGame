@@ -584,6 +584,7 @@ class EditorInterface(QWidget):
 
         # 4) 歌词预览（占主要空间）
         self.preview = KaraokePreview(self)
+        self.preview._c_class_action_guard = self._allow_c_class_action
         # 预览默认 minimumHeight（声谱模式让位后可恢复的原值）
         self._preview_default_min_h = self.preview.minimumHeight()
         self.preview.line_clicked.connect(self._on_line_clicked)
@@ -1692,6 +1693,8 @@ class EditorInterface(QWidget):
         """
         if not self._project:
             return
+        if self._reject_during_ruby_analysis():
+            return
         self._collapse_extended_selection_for_action(
             self.tr("粘贴字符"), notify=False
         )
@@ -1933,6 +1936,8 @@ class EditorInterface(QWidget):
         插入经 _execute_structural_edit 包装，纳入 undo/redo。
         """
         if not self._project:
+            return
+        if self._reject_during_ruby_analysis():
             return
         self._collapse_extended_selection_for_action(
             self.tr("粘贴字符"), notify=False
@@ -3922,6 +3927,10 @@ class EditorInterface(QWidget):
         checker = getattr(getattr(self, "preview", None), "is_extended_selection", None)
         return bool(checker()) if callable(checker) else False
 
+    def _allow_c_class_action(self) -> bool:
+        """右键 C 类动作执行前守卫：注音分析忙碌时拒绝且不清选区。"""
+        return not self._reject_during_ruby_analysis()
+
     def _collapse_extended_selection_for_action(
         self, action_label: str, *, notify: bool = True
     ) -> Optional[tuple[int, int]]:
@@ -4105,7 +4114,11 @@ class EditorInterface(QWidget):
         if not self._project:
             return
 
-        self._collapse_extended_selection_for_action(self.tr("插入导唱符"))
+        if self._reject_during_ruby_analysis():
+            return
+        self._collapse_extended_selection_for_action(
+            self.tr("插入导唱符"), notify=False
+        )
 
         line_idx, char_idx = self._resolve_target_char()
         if line_idx < 0 or line_idx >= len(self._project.sentences):
@@ -7337,9 +7350,11 @@ class EditorInterface(QWidget):
             self.preview._current_line_idx = 0
             self.preview._current_char_idx = 0
             self.preview._current_checkpoint_idx = None
+            self.preview.clear_extended_selection()
             self.refresh_lyric_display()
             self._update_time_tags_display()
             self._update_status()
+            self._update_line_info()
             return
 
         line_idx = focus_line_idx if focus_line_idx is not None else self._current_line_idx
@@ -7354,16 +7369,20 @@ class EditorInterface(QWidget):
 
         self._update_selected_checkpoint(line_idx, char_idx, checkpoint_idx)
         self.preview.set_current_position(line_idx, char_idx)
-        self.preview.set_focus_position(line_idx, char_idx)
-        self._current_line_idx = line_idx
 
         if move_cp and self._timing_service and sentence.characters:
             target_cp = checkpoint_idx if checkpoint_idx is not None else 0
             self._timing_service.move_to_checkpoint(line_idx, char_idx, target_cp, prefer_backward=True)
 
+        # current 必须在 set_focus_position 触发 selection_changed/状态栏之前更新；
+        # 但 move_to_checkpoint 回调仍要看到旧 current，以校验离开行的冗余时间戳。
+        self._current_line_idx = line_idx
+        self.preview.set_focus_position(line_idx, char_idx)
+
         self.refresh_lyric_display()
         self._update_time_tags_display()
         self._update_status()
+        self._update_line_info()
         if hasattr(self, "_store") and self._store:
             self._store.notify(change_type)
 
@@ -7520,6 +7539,8 @@ class EditorInterface(QWidget):
 
     def _insert_line_break_at_current(self):
         if not self._project:
+            return
+        if self._reject_during_ruby_analysis():
             return
         self._collapse_extended_selection_for_action(self.tr("断行"))
         line_idx, char_idx = self._resolve_target_char()
@@ -7965,11 +7986,11 @@ class EditorInterface(QWidget):
             if start > end:
                 continue
             if start == end:
-                # 单字段不能“向后连词”，只允许取消已有连词；
-                # 行末字符没有下一个字，跳过。
-                if start >= len(chars) - 1:
+                # 单字段没有“段内下一个字”可连；只允许取消已有连词，
+                # 绝不把孤立选中字连到未选中的后一个字。
+                if not chars[start].linked_to_next:
                     continue
-                decisions.append((line_idx, start, end, not chars[start].linked_to_next))
+                decisions.append((line_idx, start, end, False))
             else:
                 link = all(not c.linked_to_next for c in chars[start : end + 1])
                 decisions.append((line_idx, start, end, link))
@@ -8071,6 +8092,7 @@ class EditorInterface(QWidget):
         self.preview._focus_char_idx = new_char
         self.preview._focus_line_range_end = new_line
         self.preview._focus_char_range_end = new_char
+        self.preview._focus_explicit = False
         # 驱动 current 跟随：找最近 cp 反馈到 current。
         # 抑制 _apply_checkpoint_position 的居中滚动，以 focus 域为基准。
         self._suppress_cp_cursor_move = True
@@ -8149,6 +8171,7 @@ class EditorInterface(QWidget):
         self.preview._focus_char_idx = new_char
         self.preview._focus_line_range_end = new_line
         self.preview._focus_char_range_end = new_char
+        self.preview._focus_explicit = False
         # 驱动 current 跟随：让 TimingService 找最近 cp，
         # 反馈经 _apply_checkpoint_position 更新 current 域。
         # 抑制居中滚动，以 focus 域为基准。
@@ -8539,6 +8562,8 @@ class EditorInterface(QWidget):
     def _on_insert_space_before_requested(self, line_idx: int, char_idx: int):
         if not self._project:
             return
+        if self._reject_during_ruby_analysis():
+            return
         target = self._collapse_extended_selection_for_action(self.tr("插入空格"))
         if target is not None:
             line_idx, char_idx = target
@@ -8568,6 +8593,8 @@ class EditorInterface(QWidget):
 
     def _on_insert_space_after_requested(self, line_idx: int, char_idx: int):
         if not self._project:
+            return
+        if self._reject_during_ruby_analysis():
             return
         target = self._collapse_extended_selection_for_action(self.tr("插入空格"))
         if target is not None:
@@ -8600,6 +8627,8 @@ class EditorInterface(QWidget):
         """在当前字符后插入空格（快捷键入口）。"""
         if not self._project:
             return
+        if self._reject_during_ruby_analysis():
+            return
         self._collapse_extended_selection_for_action(self.tr("插入空格"))
         line_idx, char_idx = self._resolve_target_char()
         if line_idx < 0 or line_idx >= len(self._project.sentences):
@@ -8629,6 +8658,8 @@ class EditorInterface(QWidget):
         """将当前行合并到上一行（快捷键触发）。"""
         if not self._project:
             return
+        if self._reject_during_ruby_analysis():
+            return
         self._collapse_extended_selection_for_action(self.tr("合并上一行"))
         line_idx = self._current_line_idx
         if line_idx <= 0 or line_idx >= len(self._project.sentences):
@@ -8637,6 +8668,8 @@ class EditorInterface(QWidget):
 
     def _on_merge_line_up_requested(self, line_idx: int):
         if not self._project:
+            return
+        if self._reject_during_ruby_analysis():
             return
         target = self._collapse_extended_selection_for_action(self.tr("合并上一行"))
         if target is not None:
@@ -8660,6 +8693,8 @@ class EditorInterface(QWidget):
     def _on_delete_line_requested(self, line_idx: int):
         if not self._project:
             return
+        if self._reject_during_ruby_analysis():
+            return
         target = self._collapse_extended_selection_for_action(self.tr("删除本行"))
         if target is not None:
             line_idx = target[0]
@@ -8678,6 +8713,8 @@ class EditorInterface(QWidget):
 
     def _on_insert_blank_line_before_requested(self, line_idx: int):
         if not self._project:
+            return
+        if self._reject_during_ruby_analysis():
             return
         target = self._collapse_extended_selection_for_action(self.tr("插入空行"))
         if target is not None:
@@ -8698,6 +8735,8 @@ class EditorInterface(QWidget):
 
     def _on_insert_blank_line_requested(self, line_idx: int):
         if not self._project:
+            return
+        if self._reject_during_ruby_analysis():
             return
         target = self._collapse_extended_selection_for_action(self.tr("插入空行"))
         if target is not None:
@@ -11431,6 +11470,7 @@ class EditorInterface(QWidget):
 
         line_idx = max(0, self._current_line_idx)
         char_idx = max(0, self.preview._current_char_idx)
+        self.preview.clear_extended_selection()
         dlg = FullTextEditDialog(
             self._store, self, current_line=line_idx, current_char=char_idx
         )

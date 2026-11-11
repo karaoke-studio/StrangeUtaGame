@@ -603,6 +603,9 @@ class KaraokePreview(QWidget):
         self._focus_char_idx: int = -1
         self._focus_line_range_end: int = -1
         self._focus_char_range_end: int = -1
+        # 只有用户显式划选/点选后的 legacy 选区才能并入 Ctrl 扩展选区；
+        # set_project 的初始光标和纯键盘导航不算“已选中”。
+        self._focus_explicit: bool = False
         self._focus_dragging: bool = False
 
         # 跨字符选区（Ctrl+左键）。None = 使用上面的单段焦点选区（原始行为，
@@ -613,6 +616,10 @@ class KaraokePreview(QWidget):
         # 扩展选区里“最后选中”的字符。C 类操作退出跨字符选区时保留它，
         # 作为后续单字/单行操作的落点。
         self._last_selected_char: Optional[tuple[int, int]] = None
+
+        # 右键 C 类动作执行前的可选守卫（由 EditorInterface 注入）。
+        # 返回 False 表示当前不能执行（如注音分析忙碌），preview 不清选区。
+        self._c_class_action_guard = None
 
         # Ctrl+左键手势状态：按下时只记锚点，拖动中仅预览，松开才提交。
         self._ctrl_sel_active: bool = False
@@ -941,6 +948,7 @@ class KaraokePreview(QWidget):
         self._focus_char_idx = -1
         self._focus_line_range_end = -1
         self._focus_char_range_end = -1
+        self._focus_explicit = False
         self._focus_dragging = False
         self._ext_selection_chars = None
         self._last_selected_char = None
@@ -981,12 +989,14 @@ class KaraokePreview(QWidget):
             self._focus_char_idx = char_idx
             self._focus_line_range_end = line_idx
             self._focus_char_range_end = char_idx
+            self._focus_explicit = False
             self.request_repaint()
             return
         self._focus_line_idx = line_idx
         self._focus_char_idx = char_idx
         self._focus_line_range_end = line_idx
         self._focus_char_range_end = char_idx
+        self._focus_explicit = False
         if self._is_playing:
             self._warm_nearby_cache(budget=2)
         self.request_repaint()
@@ -1155,41 +1165,28 @@ class KaraokePreview(QWidget):
         self.selection_changed.emit()
         return None
 
-    def collapse_extended_selection_to_char(
-        self, line_idx: int, char_idx: int
-    ) -> Optional[tuple[int, int]]:
-        """退出扩展选区，并把焦点落到指定字符（右键菜单目标）。"""
-        if self._ext_selection_chars is None:
-            return None
-        self._ext_selection_chars = None
-        self._last_selected_char = None
-        self._reset_ctrl_selection_gesture()
-        if not self._project or line_idx < 0 or line_idx >= len(self._project.sentences):
-            self.update()
-            self.selection_changed.emit()
-            return None
-        chars = self._project.sentences[line_idx].characters
-        if not chars:
-            self.update()
-            self.selection_changed.emit()
-            return None
-        char_idx = max(0, min(int(char_idx), len(chars) - 1))
-        self._set_legacy_selection_range(line_idx, char_idx, line_idx, char_idx)
-        self.update()
-        self.selection_changed.emit()
-        return (line_idx, char_idx)
-
     def _collapse_extended_then_emit(
         self, signal, target_line: int, target_char: int, *args
     ) -> None:
-        """右键菜单 C 类操作：先退化为目标单字/单行，再走普通信号。"""
-        if self._ext_selection_chars is not None:
-            self.collapse_extended_selection_to_char(target_line, target_char)
-        signal.emit(*args)
+        """右键菜单 C 类操作：先退出扩展选区，再按最后选中字符/行执行。
 
-    def set_last_selected_char(self, line_idx: int, char_idx: int) -> None:
-        """记录扩展选区中“最后选中”的字符（供 C 类操作落点）。"""
-        self._last_selected_char = (int(line_idx), int(char_idx))
+        target_* 仅用于非扩展选区的普通菜单路径；扩展选区按需求保留
+        “最后选中”的字符，而不是右键命中的字符。
+        """
+        if self._ext_selection_chars is not None:
+            guard = getattr(self, "_c_class_action_guard", None)
+            if callable(guard) and not guard():
+                return
+            last = self.collapse_extended_selection_to_last()
+            if last is not None:
+                new_args = list(args)
+                if new_args:
+                    new_args[0] = last[0]
+                if len(new_args) >= 2:
+                    new_args[1] = last[1]
+                signal.emit(*new_args)
+                return
+        signal.emit(*args)
 
     def _range_to_line_spans(
         self, start_line: int, start_char: int, end_line: int, end_char: int
@@ -1296,12 +1293,15 @@ class KaraokePreview(QWidget):
         self._focus_char_idx = int(start_char)
         self._focus_line_range_end = int(end_line)
         self._focus_char_range_end = int(end_char)
+        self._focus_explicit = True
         self._focus_dragging = False
 
     def _extended_chars_for_update(self) -> "set[tuple[int, int]]":
         """当前选区（原始或扩展）转成字符集合，供 Ctrl 手势增量修改。"""
         if self._ext_selection_chars is not None:
             return set(self._ext_selection_chars)
+        if not self._focus_explicit:
+            return set()
         sel = self._legacy_normalized_selection()
         if sel is None:
             return set()
@@ -1399,6 +1399,7 @@ class KaraokePreview(QWidget):
             self._focus_char_idx = char_idx
             self._focus_line_range_end = line_idx
             self._focus_char_range_end = char_idx
+            self._focus_explicit = True
             self._last_selected_char = key
             self._focus_dragging = False
             self.update()
@@ -1502,7 +1503,7 @@ class KaraokePreview(QWidget):
         self._drag_scroll_direction = 0
         if anchor is None:
             return
-        if moved and extent is not None:
+        if moved and extent is not None and extent != anchor:
             active_char = extent
             if anchor[0] > extent[0] or (
                 anchor[0] == extent[0] and anchor[1] > extent[1]
@@ -2393,6 +2394,7 @@ class KaraokePreview(QWidget):
                 self._focus_char_idx = char_idx
                 self._focus_line_range_end = line_idx
                 self._focus_char_range_end = char_idx
+                self._focus_explicit = True
                 self._focus_dragging = True
                 self._pending_click = {
                     "type": "char",
@@ -2410,6 +2412,7 @@ class KaraokePreview(QWidget):
             self._focus_char_idx = char_idx
             self._focus_line_range_end = line_idx
             self._focus_char_range_end = char_idx
+            self._focus_explicit = True
             self._focus_dragging = True
             if hit_type == "cp":
                 self._pending_click = {
@@ -2449,6 +2452,7 @@ class KaraokePreview(QWidget):
             self._focus_char_idx = 0
             self._focus_line_range_end = target_idx
             self._focus_char_range_end = 0
+            self._focus_explicit = True
             self._focus_dragging = True
             self._pending_click = {
                 "type": "char",
@@ -2702,6 +2706,7 @@ class KaraokePreview(QWidget):
             self._focus_char_idx = target_char_idx
             self._focus_line_range_end = target_line_idx
             self._focus_char_range_end = target_char_idx
+            self._focus_explicit = False
 
         extended = self.is_extended_selection()
         ext_ranges = self.get_selected_char_ranges() if extended else []
@@ -2795,8 +2800,11 @@ class KaraokePreview(QWidget):
         menu.addAction(insert_space_after_action)
         menu.addSeparator()
 
+        merge_line_idx = target_line_idx
+        if extended and self._last_selected_char is not None:
+            merge_line_idx = self._last_selected_char[0]
         merge_up_action = Action(self.tr("合并上一行"), menu)
-        merge_up_action.setEnabled(target_line_idx > 0)
+        merge_up_action.setEnabled(merge_line_idx > 0)
         merge_up_action.triggered.connect(
             lambda checked=False: self._collapse_extended_then_emit(
                 self.merge_line_up_requested,
