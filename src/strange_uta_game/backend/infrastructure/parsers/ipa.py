@@ -24,7 +24,6 @@ https://en.wikipedia.org/wiki/International_Phonetic_Alphabet ）。IPA 文本
 from __future__ import annotations
 
 import unicodedata
-from typing import Dict, FrozenSet, List, Optional, Tuple
 
 from strange_uta_game.backend.domain.graphemes import (
     grapheme_base,
@@ -49,7 +48,7 @@ __all__ = [
 # 字符集
 # ──────────────────────────────────────────────
 
-def _expand(spec: str) -> FrozenSet[str]:
+def _expand(spec: str) -> frozenset[str]:
     """把 "0250-02AF 1D00" 形式的区间描述展开为字符集合。"""
     out = set()
     for part in spec.split():
@@ -102,9 +101,23 @@ _MODIFIER_BACK = _expand(
 _STRESS_MARKS = frozenset({"\u02c8", "\u02cc", "\ua71b", "\ua71c"})
 
 # 元音字母（含拉丁通用与 IPA 专用；æ ø œ 等 Unicode 原样）
+# 含带变音符的元音字母（ā ō ū ǎ ǐ ǔ â é í …）——罗马字/拼音/语音学惯例中
+# 它们仍是元音核心；只影响已触发 IPA 词内的音节切分，正字法文本
+# （café 等）不触发 IPA 路径，不受影响。
 _VOWELS = frozenset(
-    "aeiouyæɑɒæøœɶɐɞʌɤɯɨʉɘɵəɚɝɜɛɪʏʊyro"  # o 最后两个是希腊 ο/ω 借用，罕见
+    "aeiouyæɑɒøœɶɐɞʌɤɯɨʉɘɵəɚɝɜɛɪʏʊ"
     "AEIOUYÆØŒ"
+    "āēīōūȳ"
+    "ǎěǐǒǔ"
+    "âêîôû"
+    "áéíóúý"
+    "àèìòù"
+    "äëïöü"
+    "ĀĒĪŌŪ"
+    "ÂÊÎÔÛ"
+    "ÁÉÍÓÚ"
+    "ÀÈÌÒÙ"
+    "ÄËÏÖÜ"
 )
 
 # 音节核心附加符：成音节（◌̩ U+0329 / ◌̍ U+030D）使辅音自成音节；
@@ -141,12 +154,19 @@ def _is_letter_cluster(cluster: str) -> bool:
 
 
 def _is_word_member(ch: str, cluster: str) -> bool:
-    """簇是否可作为 IPA 词的成员（用于词边界扩展）。"""
+    """簇是否可作为 IPA 词的成员（用于词边界扩展）。
+
+    组合附加符（U+0300–036F 等 Extend 码点）是词成员——否则 ``ɑ̃ː`` 会在
+    附加符处断词，`̃` 后的 `ː` 变成单字母"词"而凭空获得节奏点。
+    """
     if is_ipa_specific_char(ch) or is_phonetic_modifier(ch) or is_stress_mark(ch):
+        return True
+    if ch in _SYLLABLE_BREAK or ch == _LINKING:
         return True
     base = grapheme_base(cluster)
     if base in _VOWELS:
         return True
+    # 字母基字 + 附加符的多码点簇（ɑ̃/n̩）整体是成员——附加符不断词
     return _is_letter_cluster(cluster)
 
 
@@ -160,22 +180,41 @@ def has_ipa_text(text: str) -> bool:
     return any(is_ipa_specific_char(ch) for ch in text)
 
 
-def find_ipa_words(text: str) -> List[Tuple[int, int, str]]:
+def _has_word_base(word: str) -> bool:
+    """词内是否含至少一个**非修饰符**音段（字母簇或元音）。
+
+    纯修饰符串（`˥˥` 声调条、孤立 `ˈ`、`⁵⁵` 声调数字）依附相邻音段，
+    自身不是词——不应作为「IPA 词」获得节奏点/词尾停顿点（审查反馈 #1）。
+    """
+    for cluster in split_graphemes(word):
+        if len(cluster) > 1:
+            return True  # 基字+附加符簇
+        if not (is_stress_mark(cluster) or is_phonetic_modifier(cluster)):
+            return True  # 字母 / 元音 / 数字等非修饰符基字
+    return False
+
+
+def find_ipa_words(text: str) -> list[tuple[int, int, str]]:
     """定位文本中的所有 IPA 词（含 IPA 特有字符的最大连续语音段）。
 
     Returns:
         ``(start, end, word)`` 列表，``end`` 为排他下标（与
         ``english_ruby.find_english_words`` 同构）。纯 ASCII / 纯正字法
-        文本返回空表。
+        文本返回空表；纯修饰符串（声调条、孤立重音符）不构成词。
     """
+    # 快速出口（审查反馈 #3）：无 IPA 特有字符的文本（常规日/中/英/韩歌词）
+    # 一次线性扫描即返回，不进入逐簇分词——`find_english_words` 每句调用约
+    # 5 次，CJK 行逐簇 next_grapheme_end 的开销会放大到大项目秒级。
+    if not has_ipa_text(text):
+        return []
     n = len(text)
-    words: List[Tuple[int, int, str]] = []
+    words: list[tuple[int, int, str]] = []
     # 先按「潜在成员」粗分段：字母、附加符、修饰符、音节点、连接符
-    def _cluster_at(pos: int) -> Tuple[int, str]:
-        if text[pos] >= "\u0300":
-            end = next_grapheme_end(text, pos)
-            return end - pos, text[pos:end]
-        return 1, text[pos]
+    def _cluster_at(pos: int) -> tuple[int, str]:
+        # 不能按 text[pos] >= U+0300 短路：IPA 区块字母（U+0250–02AF）本身
+        # 小于 U+0300，但其后可跟组合附加符——next_grapheme_end 内部有真快路径
+        end = next_grapheme_end(text, pos)
+        return end - pos, text[pos:end]
 
     i = 0
     while i < n:
@@ -195,7 +234,7 @@ def find_ipa_words(text: str) -> List[Tuple[int, int, str]]:
                 else:
                     break
             word = text[i:end]
-            if is_ipa_word(word):
+            if is_ipa_word(word) and _has_word_base(word):
                 words.append((i, end, word))
             i = max(end, i + 1)
         else:
@@ -208,7 +247,7 @@ def find_ipa_words(text: str) -> List[Tuple[int, int, str]]:
 # ──────────────────────────────────────────────
 
 
-def split_phonetic_units(text: str) -> List[str]:
+def split_phonetic_units(text: str) -> list[str]:
     """把文本切成「语音单位」：组合附加符并入基字、修饰符并入前一单位、
     重音符并入后一单位。单位串拼接无损。
 
@@ -219,8 +258,9 @@ def split_phonetic_units(text: str) -> List[str]:
         ['hə', 'ˈlə', 'ʊ']
     """
     clusters = split_graphemes(text)
-    units: List[str] = []
+    units: list[str] = []
     pending_stress = ""
+    dot_break = False  # 音节点后强制断单位（其后的修饰符不再并入前单位）
     for cluster in clusters:
         if cluster and is_stress_mark(cluster):
             # 重音符依附**后**一个单位（构成其后音节的前缀）；行尾悬挂的
@@ -229,10 +269,13 @@ def split_phonetic_units(text: str) -> List[str]:
             continue
         unit = pending_stress + cluster
         pending_stress = ""
-        if units and _attaches_back(unit):
+        if cluster == _SYLLABLE_BREAK:
+            dot_break = True
+        if units and _attaches_back(unit) and not (dot_break and cluster != _SYLLABLE_BREAK):
             units[-1] += unit
         else:
             units.append(unit)
+            dot_break = False
     if pending_stress:
         if units:
             units[-1] += pending_stress
@@ -259,30 +302,37 @@ _EXPLICIT_ONSET = 0x2  # 显式开新音节（重音符前缀）
 _BOUNDARY_AFTER = 0x4  # 单位尾部带音节点 ``.``（其后开新音节）
 
 
-def _unit_flags(units: List[str]) -> List[int]:
+def _unit_flags(units: list[str]) -> list[int]:
     """计算每个语音单位的属性位。"""
     stress_prefix = "".join(_STRESS_MARKS)
-    flags: List[int] = []
+    flags: list[int] = []
     for u in units:
         f = 0
         if u[:1] in _STRESS_MARKS:
             f |= _EXPLICIT_ONSET
-        if u.endswith(_SYLLABLE_BREAK):
+        # 音节点可被后随修饰符并入同单位（`k.ʰ`）——只要出现在单位内任何
+        # 非首位位置都算「其后开新音节」（审查反馈 #4：endswith 会漏判）
+        dot_pos = u.find(_SYLLABLE_BREAK)
+        if dot_pos > 0:
             f |= _BOUNDARY_AFTER
         body = u.strip(stress_prefix + _SYLLABLE_BREAK + _LINKING)
         if body:
-            base = grapheme_base(body)
+            # 单位可能含多个字素簇（连结线并簇 da͡i、附着修饰 tʰ）：
+            # 任一簇的基字是元音（或带成音节符）即为核心
             non_syllabic = any(c in _NONSYLLABIC_MARKS for c in body)
             syllabic = any(c in _SYLLABIC_MARKS for c in body)
-            if not (non_syllabic and not syllabic) and (
-                base in _VOWELS or syllabic
-            ):
+            if syllabic:
                 f |= _NUCLEUS
+            elif not non_syllabic:
+                for cluster in split_graphemes(body):
+                    if grapheme_base(cluster) in _VOWELS:
+                        f |= _NUCLEUS
+                        break
         flags.append(f)
     return flags
 
 
-def _unit_onsets(units: List[str]) -> "set[int]":
+def _unit_onsets(units: list[str]) -> set[int]:
     """返回「开新音节」的单位下标集合（恒含 0）。空白分词，词内切音节。"""
     n = len(units)
     if n <= 1:
@@ -315,18 +365,23 @@ def _unit_onsets(units: List[str]) -> "set[int]":
         return w
 
     clean_nuclei = [i for i in range(n) if flags[i] & _NUCLEUS]
+    # 显式边界快照（音节点/重音符/空白）：两核心间**或终点上**已有显式边界
+    # 时启发式让位——`æk.ə` 的 k. 属前一音节（æk.），不能按 V.CV 拆去后音节
+    explicit_onsets = frozenset(onsets)
     for a, b in zip(clean_nuclei, clean_nuclei[1:]):
         if b - a <= 1:
             continue  # 相邻核心：复合元音，同一音节
         if _word_of(a) != _word_of(b):
             continue  # 跨词不配对（词首已由空白边界处理）
         mid = list(range(a + 1, b))
+        if any(i in explicit_onsets for i in range(a + 1, b + 1)):
+            continue
         boundary = mid[0] if len(mid) == 1 else mid[1]
         onsets.add(boundary)
     return onsets
 
 
-def ipa_syllable_onset_offsets(word: str) -> "set[int]":
+def ipa_syllable_onset_offsets(word: str) -> set[int]:
     """返回 ``word`` 内各音节起始的**码点偏移**集合（恒含 0）。
 
     与 ``english_ruby.get_syllable_start_offsets`` 同构，供节奏点分配
@@ -337,28 +392,43 @@ def ipa_syllable_onset_offsets(word: str) -> "set[int]":
     """
     units = split_phonetic_units(word)
     if len(units) <= 1:
-        # 单位词：跳过前导重音符
-        return {_skip_leading_stress(word, 0)}
+        # 单位词：跳过前导重音符/修饰符
+        return {_skip_leading_modifiers(word, 0)}
     onsets = _unit_onsets(units)
     offsets = []
     pos = 0
     for u in units:
         offsets.append(pos)
         pos += len(u)
-    return {
-        _skip_leading_stress(units[i], offsets[i]) for i in onsets
-    }
+    result: set[int] = set()
+    for i in onsets:
+        k = _skip_leading_modifiers(units[i], offsets[i])
+        if k is not None:
+            result.add(k)
+        elif i + 1 < len(units):
+            # 整个单位都是重音符/修饰符（词首声调串）：音节首取下一单位
+            result.add(offsets[i + 1])
+    return result if result else {0}
 
 
-def _skip_leading_stress(unit: str, offset: int) -> int:
-    """把单位起始偏移推进到第一个非重音符处（重音符不承载节奏点）。"""
+def _skip_leading_modifiers(unit: str, offset: int) -> "int | None":
+    """单位内第一个**实际音段**的偏移；单位全为重音符/修饰符时返回 None。
+
+    前导重音符（ˈ ˌ）与前导修饰符（声调条 ˥、ʰ 等）都不承载节奏点——
+    词首声调串（`˥˥ne`）的音节首应落在其后的元音/辅音音段上
+    （审查反馈 #1 收尾）。
+    """
     k = 0
-    while k < len(unit) and is_stress_mark(unit[k]):
+    while k < len(unit) and (
+        is_stress_mark(unit[k]) or is_phonetic_modifier(unit[k])
+    ):
         k += 1
-    return offset + (k if k < len(unit) else 0)
+    if k >= len(unit):
+        return None
+    return offset + k
 
 
-def ipa_syllables(text: str) -> List[str]:
+def ipa_syllables(text: str) -> list[str]:
     """把 IPA 文本切成音节串列表（拼接无损），供注音分段使用。
 
     Example:
@@ -375,8 +445,8 @@ def ipa_syllables(text: str) -> List[str]:
     if len(units) == 1:
         return [text]
     onsets = _unit_onsets(units)
-    syllables: List[str] = []
-    current: List[str] = []
+    syllables: list[str] = []
+    current: list[str] = []
     for i, u in enumerate(units):
         if i in onsets and current:
             syllables.append("".join(current))

@@ -405,3 +405,105 @@ SUG 的独立更新器（`updater_app/`，冻结为 Updater.exe）在宿主形�
 签名不匹配会让更新器启动即崩且 standalone 侧无任何先兆。
 
 standalone 行为（`embedded=False` 路径）**绝不能**因 embedded 改动而回退 —— 这是 SUG 独立分发的红线。
+
+## 10. 国际音标（IPA）与字素簇支持（数据契约）
+
+SUG 现已**完整支持国际音标**（[IPA](https://en.wikipedia.org/wiki/International_Phonetic_Alphabet)）
+作为主文字与注音文本。宿主若直接消费 `Character` / ruby / 导出文本，请阅读以下契约变化。
+
+### 10.1 核心数据契约：`Character.char` 不再保证单码点
+
+`Character.char` 的语义从「一个 Unicode 码点」升级为「**一个字素簇**（UAX #29 扩展字素簇 + SUG 裁剪）」：
+
+- 组合附加符与其基字是**同一个字符**：`ɛ̃`（U+025B U+0303）、`n̩`、`d̥`、`ŋ̊`、`ẽ`（`e`+U+0301+U+0303，多重叠加）各占一个 `Character`；
+- **连结线裁剪（IPA 专属）**：`t͡ʃ`、`k͜p` 等双基字附加符（U+035C–0362、U+1DCD、U+1DFC）把前后两个基字并成**一个** `Character`（塞擦音/双重调音是一个音段、一个节奏点单位）；
+- **兼容裁剪**：半角片假名浊点（U+FF9E/FF9F）保持独立字符（既有日文流程行为不变）；
+- emoji 序列（ZWJ 家庭、旗帜 RI 对、变体选择符、肤色修饰符）是一个 `Character`；
+- 常规日/中/英/韩歌词（不含上述可并簇码点）**逐字符不变**——`split_graphemes(text) == list(text)`。
+
+**宿主必须遵守的规则**：
+
+1. **不要假设 `len(char.char) == 1`**。以 `strange_uta_game.backend.domain.graphemes` 的
+   `grapheme_count(text)` / `chars_to_offsets(chars)` / `offset_to_index(offsets, offset)` 做
+   「文本偏移 ↔ 字符下标」换算；
+2. `sentence.text` 的**码点偏移不等于** `sentence.characters` 下标；
+3. `.sug` 存档格式不变（`char` 仍是字符串），旧版 SUG 读取含多码点簇的新文件时按码点拆分显示（可接受降级）；新版打开旧文件时自动把孤立附加符残段（如 `['ɛ','̃']`）**自愈合并**回基字（`Sentence.normalize_graphemes()`，加载时执行）。
+
+### 10.2 自动注音行为（IPA 词）
+
+含「IPA 特有字符」（IPA Extensions U+0250–02AF、间隔修饰字母中的超音段 ˈ ˌ ː ˑ ˞、语音扩展 U+1D00–1DBF、声调字母 U+A700–A71F、连结线、成音节/非成音节等 IPA 专属附加符、上标 4–9 声调数字）的连续语音段按 **IPA 词**处理：
+
+- 整词连词、**音节首**一个节奏点（显式 `.` 音节点 / 重音号优先，否则元音核心 + 最大音节首启发式：`V.CV`、`VC.CCV`；连结线塞擦音是一个辅音单位）；
+- 修饰符（`ʰ ʷ ː ˥ ⁿ …`）与重音号 `ˈ ˌ` **永不**自动获得节奏点；
+- IPA 词内的 ASCII 字母片段（如 `wɜːld` 的 `ld`）不再被当英文词处理（修复：不再注字母名片假名、不再误加词尾停顿点）；
+- 法文/西班牙文等**正字法变音符**（café、naïve、señor、预组合 ã）不触发 IPA 路径，行为与旧版一致；
+- 注音分段：`split_into_moras` 对含 IPA 特有字符的读音按**音节**拆分（`həˈləʊ` → `['hə','ˈləʊ']`），假名按拍、英文按字符——基字与附加符永不被拆开。
+
+### 10.3 字体与渲染契约
+
+- **问题背景**：CJK 主字体（微软雅黑等）缺 IPA 字形时逐字回退，附加符与基字分属不同字体、无法 GPOS 锚定——附加符漂移、重音符 `ˈ ˌ`（Tahoma 中是零宽字形）与后字重叠。Qt 的 `tightBoundingRect` 还不计 GPOS 定位的附加符，连词框几何失真。
+- **方案**：检测为 IPA 的文本段（IPA 词内的字符、多码点簇）整段改用 **IPA 字体**排版（基字与附加符同字体、带 mark 锚定）。候选链按平台：
+  - Windows：Charis SIL → Doulos SIL → Gentium Plus → Andika → **Segoe UI** → Arial → Times New Roman → Cambria → Calibri → Noto Sans → DejaVu Sans（**不含 Tahoma**——其 IPA 重音/长音符零宽）；
+  - macOS：SIL 系 → Lucida Grande → Arial Unicode MS → Arial/Times → Menlo → Noto/DejaVu；
+  - 其他（Linux 等）：SIL 系 → Noto Sans → DejaVu Sans → FreeSans → Liberation Sans。
+- 配置键 `ui.ipa_font`（`"auto"` 默认，走候选链；可填已安装字体名覆盖）。读取点在
+  `frontend/font_utils.py::set_ipa_font_override / ipa_font_family / phonetic_lyrics_font`。
+- 渲染几何改用**矢量轮廓墨水**（`QPainterPath.addText` 包围盒，含上下附加符），连词框 / wipe 裁剪 / 行墨水上下界全部按真实墨水计算；无字形码点的空矩形哨兵值（x≈100000）已归零防护。
+- 注音整串单次排版（整簇同字体），分拍宽度按前缀 advance 累计测量（与绘制同源）。
+
+### 10.4 保留字符与已知限制
+
+- 注音行内格式中 `|` `,` `{` `}` `＋` 是结构字符：IPA 音节群 minor break `|` 请用 `‖`（U+2016）或 `.`（U+002E）替代，或以 `，`全角逗号替代分隔语义；
+- 上标 0–3（⁰¹²³常见序号）不触发 IPA 判定；上标 4–9（粤语声调）触发；
+- **字符分类兼容**（审查后收紧）：`² ³ 1 ⁿ` 与正字法撇号（夏威夷 ʻokina 等）保持历史分类（NUMBER/ALPHABET，保留节奏点资格）；只有无歧义的 IPA 超音段/修饰字母（ˈ ˌ ː ˑ ˞ ʰ ʲ ʷ ˠ ˤ ˥–˩ ˬ ˭）归 `MODIFIER`（永不自动获得节奏点）；
+- 纯修饰符串（`˥˥`、孤立 `ˈ`）不构成 IPA 词，不产生词级节奏点/停顿点；
+- 半角浊点 `ｶﾞ` 仍按两字符处理（兼容既有日文词典/节奏点规则）；
+- AI 打轴对 IPA 主文字按音节首节奏点对齐——`MODIFIER` 字符因 cc=0 不生成对齐单元，多码点簇按基字归 LATIN script 桶（`ai_timing/pronunciation.py::_SCRIPT_BY_CHAR_TYPE`）。
+
+### 10.4.1 导出面与互操作（宿主注意）
+
+- **`export_to_next_payload()["project"]`**：是 Project 域对象的 `deepcopy`（非 dict）——`Character.char` 的多码点字符串原样透传，宿主遍历需 import SUG 类；
+- **TTML**：逐字 `<span>` 文本按 `Character.char` 原样写出，`t͡ʃ`/`ɛ̃` 整簇落在 span 内；下游渲染器需正确处理组合附加符；
+- **Nicokara**：导出时 `strip_variation_selectors` 会剥离 emoji 变体选择符（`⛰️`→`⛰`）——这是历史行为，与 §10.1 的「emoji 簇不拆散」在**导出面**存在宿主可见差异；
+- **版本标记**：`.sug` `CURRENT_VERSION` 维持 `"0.3.0"` 不变（簇字符与旧格式同构、无 schema 变化）；宿主无法从版本号判断文件是否含簇字符，请按 §10.1 规则宽容处理任意 `char` 字符串；
+- **自愈边界**：旧存档合并时 leader 的 ruby parts 会以停顿符补齐到 `check_count`；行首孤立附加符（无前驱）保留原样不合并。
+
+### 10.5 测试歌词及注音（覆盖全部情况，已逐行自动验收 20/20）
+
+「正文」输入主文字编辑器/全文本编辑；「注音」列为逐字或整词注音（`{原文||读音}` 或 F2 弹窗）；
+「期望」列为自动注音管线（`analyze_and_apply_sentence_pipeline`）+ 预览渲染的正确行为。
+CJK 基准行验证旧行为零回归。
+
+| # | 正文 | 注音（IPA） | 期望 |
+|---|------|------------|------|
+| 1 | `hello world` | `həˈləʊ` `wɜːld` | （基准）英文行为不变：e2k 片假名或用户注音，音节首节奏点 |
+| 2 | `赤い花咲く` | （无） | （基准）日文行为不变：汉字注假名（赤=あか 2 拍）、假名 1 拍 |
+| 3 | `ˈhɛləʊ wɜːld` | — | IPA 主文字：`h`、`l`、`w` 各 1 节奏点（音节首），`ˈ ː` 0 节奏点，重音号渲染在音节前不重叠 |
+| 4 | `ˈt͡ʃaɪnə ˈtʃiːnz` | — | `t͡ʃ` 是**一个**字符（连结线并簇）、载节奏点；`n`（第二音节首）1 节奏点 |
+| 5 | `tʰɪŋ kʷɔɪ̯t` | — | 修饰符 `ʰ ʷ` 与非成音节 `ɪ̯` 不占独立节奏点；每词 1 音节 1 节奏点（`t`、`k`） |
+| 6 | `n̩d̥ tɑ̃` | — | 成音节 `n̩` 为音节核心；鼻化 `ɑ̃`（IPA 元音+附加符）正常渲染于基字上方；预组合 `ã`（正字法）不触发 IPA |
+| 7 | `ɕjɛn˥˥ ʈʂʂ̩˥˥` | — | 声调字母依附前一音段、不占节奏点；每词 1 节奏点；声调条正确渲染 |
+| 8 | `ma⁵⁵ si²²` | — | 上标 4–9 触发 IPA（粤语声调数字），上标 1–3 不触发（`si²²` 按普通正字法） |
+| 9 | `k̚t̚ ɑ̃ː` | — | extIPA 未爆破 `̚` 依附基字；长音符 `ː` 不占节奏点 |
+| 10 | `zəˌdɛnˈtɛst` | — | 次重音 `ˌ`、主重音 `ˈ` 开新音节：`z`、`d`、`t` 各 1 节奏点 |
+| 11 | `æk.tʃən` | — | 显式音节点 `.`：`æ`、`t` 各 1 节奏点 |
+| 12 | `café naïve señor` | — | （基准）正字法变音符不触发 IPA，行为同旧版 |
+| 13 | `hello`（连词组） | `həˈləʊ` | 连词框按**矢量墨水**框住整词注音（含声调/附加符上下越界），重音 `ˈ` 在 `l` 前正常间距 |
+| 14 | `大冒険`（连词组） | `da͡iˑbōˌken` | 汉字主文字 + IPA 注音：3 拍按音节分段 `da͡iˑ`/`bō`/`ˌken`，连结线 `a͡i` 与次重音 `ˌ` 正常分段 |
+| 15 | `你好` | `nɨ˥ xau˨˩˦` | 每字 1 拍承载整段 IPA 注音（声调字母渲染正确） |
+| 16 | `天` | `tʰiɛn˥` | 单字 1 拍：注音整段不拆；2 拍时按音节拆为 `tʰi`/`ɛn˥` |
+| 17 | `[2|00:10:00]ɛ̃[00:10:50]`（RL 内联） | — | 旧码点写法：`ɛ̃` 合并 1 字符保留 2 时间戳；簇写法 `{ɛ̃l|[1|ts]hə＋[1]ləʊ}` 往返无损 |
+| 18 | `p ɛ ̃ t`（旧 .sug 码点切分） | `p,e,,t` | 加载时 `̃` 并回 `ɛ` 成 `ɛ̃`（leader 优先：保留 ɛ 的时间戳与注音） |
+| 19 | `⛰️ ♪ 👨‍👩‍👧 行く` | — | emoji 序列各为一个字符（变体选择符/ZWJ 不拆散），日文行为不变 |
+| 20 | `wɜːldx` | — | IPA 词内 `d` 不再误标英文词尾停顿点（`is_sentence_end=False`） |
+
+配套回归测试：`tests/unit/domain/test_graphemes.py`（UAX#29 + 与 Qt `QTextBoundaryFinder`
+全 U+0300–036F 交叉验证）、`tests/unit/infrastructure/test_ipa.py`（触发/单位/音节）、
+`tests/unit/domain/test_sentence_graphemes.py`（normalize/explode 往返）、
+`tests/unit/application/test_auto_check_ipa.py`（自动注音 + 格式往返 + .sug 自愈）、
+`tests/unit/frontend/test_karaoke_preview_ipa.py`（渲染几何：哨兵防护/IPA 字体标记/墨水 4 元组）、
+`tests/unit/application/test_ipa_review_fixes.py`（subagent 审查反馈的回归：纯修饰符串、
+正字法上标兼容、CJK 热路径、音节点×修饰符、查找簇映射）。
+
+本节内容经三个独立 subagent 审查（后端正确性 / 前端渲染与编辑入口 / 文档逐行验收），
+审查发现的问题已全部修复并以上述测试锁定。

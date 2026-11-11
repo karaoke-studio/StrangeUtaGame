@@ -97,6 +97,7 @@ _SCRIPT_BY_CHAR_TYPE: Dict[CharType, ScriptKind] = {
     CharType.ALPHABET: ScriptKind.LATIN,
     CharType.HANGUL: ScriptKind.HANGUL,
     CharType.NUMBER: ScriptKind.NUMBER,
+    CharType.MODIFIER: ScriptKind.LATIN,  # IPA 修饰符/附加符依附拉丁字母音段
     CharType.SYMBOL: ScriptKind.PUNCTUATION,
     CharType.SPACE: ScriptKind.SPACE,
     CharType.FULL_SPACE: ScriptKind.SPACE,

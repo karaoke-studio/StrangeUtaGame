@@ -295,17 +295,29 @@ def _ruby_timed_spans(
 
 
 def _ruby_timed_span_maps(
-    fm: QFontMetrics,
+    fm_or_resolver,
     characters: list[Character],
     linked_leader_groups: dict[int, list[int]],
     linked_non_leader: set[int],
 ) -> tuple[dict[int, list[tuple[int, int]]], dict[int, list[tuple[int, int]]]]:
-    """计算单字及连词组的 Ruby 静态打轴区间，不包含任何走字状态。"""
+    """计算单字及连词组的 Ruby 静态打轴区间，不包含任何走字状态。
+
+    ``fm_or_resolver``：QFontMetrics，或 ``(char_idx, merged_text) -> QFontMetrics``
+    解析器。**连词组必须按合并后的整串 ruby 文本选字体**（与 paintEvent 绘制
+    同源）——按 leader 自己的 ruby 选字体时，混合组（假名+IPA）的像素区间
+    与绘制 advance 不一致（审查反馈 #6）。
+    """
+
+    def _resolve_fm(char_idx: int, merged_text: str = "") -> QFontMetrics:
+        if callable(fm_or_resolver):
+            try:
+                return fm_or_resolver(char_idx, merged_text)
+            except TypeError:
+                return fm_or_resolver(char_idx)
+        return fm_or_resolver
+
     char_spans: dict[int, list[tuple[int, int]]] = {}
     group_spans: dict[int, list[tuple[int, int]]] = {}
-
-    def _resolve_fm(char_idx: int) -> QFontMetrics:
-        return fm(char_idx) if callable(fm) else fm
 
     for char_idx, character in enumerate(characters):
         if char_idx in linked_leader_groups or char_idx in linked_non_leader:
@@ -316,8 +328,14 @@ def _ruby_timed_span_maps(
             )
     for leader_idx, group in linked_leader_groups.items():
         if any(characters[char_idx].ruby for char_idx in group):
+            merged = "".join(
+                characters[g].ruby.text
+                for g in group
+                if characters[g].ruby and characters[g].ruby.text
+            )
             _, group_spans[leader_idx] = _ruby_timed_spans(
-                _resolve_fm(leader_idx), _ruby_timing_chunks(characters, group)
+                _resolve_fm(leader_idx, merged),
+                _ruby_timing_chunks(characters, group),
             )
     return char_spans, group_spans
 
@@ -473,6 +491,17 @@ def _vector_ink_bounds(
             cache.clear()
         cache[key] = result if result is not None else ""
     return result
+
+
+def _has_multicodepoint_cluster(text: str) -> bool:
+    """文本是否含多码点字素簇（基字+附加符 / emoji 序列）。
+
+    用于 ruby/标签的 IPA 字体判定：迭代 str 只得到单码点串（``len(c) > 1``
+    恒 False 的死条件），必须按簇比较（审查反馈 #5）。
+    """
+    from strange_uta_game.backend.domain.graphemes import grapheme_count
+
+    return grapheme_count(text) != len(text)
 
 
 def _wipe_ink_bounds(fm: QFontMetrics, text: str) -> tuple[int, int]:
@@ -1990,13 +2019,16 @@ class KaraokePreview(QWidget):
         fm_ruby_ipa = getattr(self, "_fm_ruby_ipa", fm_ruby)
         from strange_uta_game.backend.infrastructure.parsers.ipa import has_ipa_text
 
-        def _fm_resolver(ci: int) -> QFontMetrics:
-            ruby = characters[ci].ruby if 0 <= ci < len(characters) else None
+        def _fm_resolver(ci: int, merged_text: str = "") -> QFontMetrics:
+            # 连词组传合并后的整串（与绘制同字体）；单字传自身 ruby
+            text = merged_text
+            if not text:
+                ruby = characters[ci].ruby if 0 <= ci < len(characters) else None
+                text = ruby.text if ruby and ruby.text else ""
             if (
                 fm_ruby_ipa is not fm_ruby
-                and ruby
-                and ruby.text
-                and (has_ipa_text(ruby.text) or any(len(c) > 1 for c in ruby.text))
+                and text
+                and (has_ipa_text(text) or _has_multicodepoint_cluster(text))
             ):
                 return fm_ruby_ipa
             return fm_ruby
@@ -3102,6 +3134,10 @@ class KaraokePreview(QWidget):
         char_ink_offsets: list[float] = []
         char_ink_widths: list[float] = []
         char_advances: list[float] = []
+        # 行墨水上下界（相对 y_center；在下方首遍循环内累计，缓存于 entry，
+        # paintEvent 不再每帧重算）
+        line_ink_top = -main_fm.ascent()
+        line_ink_bottom = main_fm.descent()
         # 墨水用矢量轮廓（tightBoundingRect 在 Windows 上不计 GPOS 附加符）；
         # 无矢量墨水（空白/无字形）回退 tightBoundingRect（含哨兵防护）
         for ci, ch in enumerate(chars):
@@ -3124,22 +3160,14 @@ class KaraokePreview(QWidget):
             char_advances.append(adv)
             char_ink_offsets.append(ink_off)
             char_ink_widths.append(ink_w)
-
-        # 行墨水上下界（相对 y_center，供色带分界与 hitbox 高度用；缓存于
-        # entry，paintEvent 不再每帧重算）
-        line_ink_top = -main_fm.ascent()
-        line_ink_bottom = main_fm.descent()
-        for ci, ch in enumerate(chars):
-            if not ch or ch.isspace():
-                continue
-            ink = _vector_ink_bounds(
-                _font_for_char(ci), ch, self._vector_ink_cache
-            )
-            if ink is None:
-                continue
-            _x, top, _w, h = ink
-            line_ink_top = min(line_ink_top, top)
-            line_ink_bottom = max(line_ink_bottom, top + h)
+            # 行墨水上下界在首遍循环内累计（审查反馈 #8：原二遍循环重复构造
+            # 矢量墨水缓存键，纯开销）
+            if ch and not ch.isspace() and ink is not None:
+                _ink_top_here, _ink_h_here = ink[1], ink[3]
+                if line_ink_top > _ink_top_here:
+                    line_ink_top = _ink_top_here
+                if line_ink_bottom < _ink_top_here + _ink_h_here:
+                    line_ink_bottom = _ink_top_here + _ink_h_here
 
         # ---------- 连词组（仅用于视觉层，与 wipe 计算无关） ----------
         char_groups: list = []
@@ -3170,7 +3198,7 @@ class KaraokePreview(QWidget):
                 has_ipa_text,
             )
 
-            if fm_ruby_ipa is not fm_ruby and (has_ipa_text(text) or any(len(c) > 1 for c in text)):
+            if fm_ruby_ipa is not fm_ruby and (has_ipa_text(text) or _has_multicodepoint_cluster(text)):
                 return fm_ruby_ipa
             return fm_ruby
 
@@ -3480,6 +3508,9 @@ class KaraokePreview(QWidget):
         # 基线（负=上方），wipe 裁剪与连词框几何用；无墨水时为 (0,0,0,0)。
         char_ruby_ink: dict[int, tuple[float, float, float, float]] = {}
         group_ruby_ink: dict[int, tuple[float, float, float, float]] = {}
+        # ruby 是否走 IPA 字体（缓存于 entry，paintEvent 免逐帧扫描判定）
+        char_ruby_is_ipa: dict[int, bool] = {}
+        group_ruby_is_ipa: dict[int, bool] = {}
 
         def _ruby_ink_bounds(text: str) -> tuple[float, float, float, float]:
             fm_txt = _fm_for_ruby_text(text)
@@ -3497,6 +3528,7 @@ class KaraokePreview(QWidget):
             ruby = ch_obj.ruby
             if ruby and ruby.text:
                 char_ruby_ink[ci] = _ruby_ink_bounds(ruby.text)
+                char_ruby_is_ipa[ci] = _fm_for_ruby_text(ruby.text) is not fm_ruby
         for leader_ci, group in linked_leader_groups.items():
             merged_text = ""
             for _gci in group:
@@ -3505,10 +3537,17 @@ class KaraokePreview(QWidget):
                     merged_text += _r.text
             if merged_text:
                 group_ruby_ink[leader_ci] = _ruby_ink_bounds(merged_text)
+                group_ruby_is_ipa[leader_ci] = (
+                    _fm_for_ruby_text(merged_text) is not fm_ruby
+                )
 
-        def _fm_for_char_ruby(ci: int) -> QFontMetrics:
-            ruby = characters[ci].ruby
-            return _fm_for_ruby_text(ruby.text) if ruby and ruby.text else fm_ruby
+        def _fm_for_char_ruby(ci: int, merged_text: str = "") -> QFontMetrics:
+            # 连词组传合并后的整串（与 paintEvent 绘制同字体）；单字传自身
+            text = merged_text
+            if not text:
+                ruby = characters[ci].ruby
+                text = ruby.text if ruby and ruby.text else ""
+            return _fm_for_ruby_text(text) if text else fm_ruby
 
         char_ruby_timed_spans, group_ruby_timed_spans = _ruby_timed_span_maps(
             _fm_for_char_ruby, characters, linked_leader_groups, linked_non_leader
@@ -3601,6 +3640,8 @@ class KaraokePreview(QWidget):
             "seg_member_to_leader": seg_member_to_leader,
             "char_ruby_ink": char_ruby_ink,
             "group_ruby_ink": group_ruby_ink,
+            "char_ruby_is_ipa": char_ruby_is_ipa,
+            "group_ruby_is_ipa": group_ruby_is_ipa,
             "char_ruby_timed_spans": char_ruby_timed_spans,
             "group_ruby_timed_spans": group_ruby_timed_spans,
             "group_ruby_wipe": group_ruby_wipe,
@@ -3980,6 +4021,8 @@ class KaraokePreview(QWidget):
             _linked_frame_data: dict = {}
             _char_ruby_ink = _rd["char_ruby_ink"]
             _group_ruby_ink = _rd["group_ruby_ink"]
+            _char_ruby_is_ipa = _rd.get("char_ruby_is_ipa", {})
+            _group_ruby_is_ipa = _rd.get("group_ruby_is_ipa", {})
             _char_ruby_timed_spans = _rd["char_ruby_timed_spans"]
             _group_ruby_timed_spans = _rd["group_ruby_timed_spans"]
             _group_ruby_wipe = _rd["group_ruby_wipe"]
@@ -4092,11 +4135,8 @@ class KaraokePreview(QWidget):
                     if _grp_rubies:
                         _merged = "".join(r.text for r in _grp_rubies)
                         # ruby 含 IPA 时整串用 IPA 注音字体（同字体才能锚定附加符）
-                        from strange_uta_game.backend.infrastructure.parsers.ipa import (
-                            has_ipa_text,
-                        )
-
-                        _ruby_is_ipa = has_ipa_text(_merged) or any(len(c) > 1 for c in _merged)
+                        # IPA 判定已在渲染数据缓存（免逐帧扫描，审查反馈 #8）
+                        _ruby_is_ipa = _group_ruby_is_ipa.get(char_pos, False)
                         _ruby_font = font_ruby_ipa if _ruby_is_ipa else font_ruby
                         _fm_ruby_here = fm_ruby_ipa if _ruby_is_ipa else fm_ruby
                         _grp_w = sum(char_widths[g] for g in _grp)
@@ -4240,13 +4280,8 @@ class KaraokePreview(QWidget):
                     if ruby:
                         # 单字符 ruby（per-char 模型）
                         _ruby_disp = ruby.text
-                        from strange_uta_game.backend.infrastructure.parsers.ipa import (
-                            has_ipa_text,
-                        )
-
-                        _ruby_is_ipa = has_ipa_text(_ruby_disp) or any(
-                            len(c) > 1 for c in _ruby_disp
-                        )
+                        # IPA 判定已在渲染数据缓存（免逐帧扫描，审查反馈 #8）
+                        _ruby_is_ipa = _char_ruby_is_ipa.get(char_pos, False)
                         _ruby_font = font_ruby_ipa if _ruby_is_ipa else font_ruby
                         _fm_ruby_here = fm_ruby_ipa if _ruby_is_ipa else fm_ruby
                         ruby_text_w = _fm_ruby_here.horizontalAdvance(_ruby_disp)

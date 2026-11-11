@@ -311,20 +311,41 @@ def ipa_font_family() -> str:
     return ""
 
 
+# phonetic_lyrics_font 缓存：pin_lyric_font_style 每次都要查 QFontDatabase
+# styles 并打分，时间轴标签逐个绘制时按标签调用会放大成可感知卡顿
+# （审查反馈 #8）。字体设置变化时键（族链+字号+字重+斜体+IPA 族）随之
+# 变化；超过上限直接清空。
+_PHONETIC_FONT_CACHE: dict[tuple, QFont] = {}
+
+
 def phonetic_lyrics_font(base: QFont) -> QFont:
     """返回用于 IPA 文本段的字体：IPA 字体优先、原歌词字体链兜底。
 
     语义见 :func:`lyrics_font`；仅在检测为 IPA/带附加符的文本段上使用，
-    其余文本仍用原字体，用户歌词字体设置不受影响。
+    其余文本仍用原字体，用户歌词字体设置不受影响。结果按字体签名缓存。
     """
     ipa = ipa_font_family()
     if not ipa:
         return base
+    key = (
+        tuple(base.families()),
+        base.pointSizeF() if base.pointSizeF() >= 0 else float(base.pointSize()),
+        int(base.weight()),
+        base.italic(),
+        ipa,
+    )
+    cached = _PHONETIC_FONT_CACHE.get(key)
+    if cached is not None:
+        return QFont(cached)  # 返回副本，调用方 setFont/save-restore 不污染缓存
     font = QFont(base)
     families = [ipa] + [f for f in base.families() if f.casefold() != ipa.casefold()]
     font.setFamilies(families)
     font.setStyleName("")  # 重新解析族样式，避免把 CJK 族的 style 钉死
-    return pin_lyric_font_style(font)
+    result = pin_lyric_font_style(font)
+    if len(_PHONETIC_FONT_CACHE) > 512:
+        _PHONETIC_FONT_CACHE.clear()
+    _PHONETIC_FONT_CACHE[key] = result
+    return QFont(result)
 
 
 def make_ch_width_metrics(family: str | None, point_size: int = 16) -> tuple[QFontMetrics, str]:

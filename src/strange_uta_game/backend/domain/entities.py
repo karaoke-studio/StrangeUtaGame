@@ -759,9 +759,13 @@ class Sentence:
     def needs_grapheme_normalization(self) -> bool:
         """是否存在「不在字素簇边界起始」的字符（需要归一化合并）。
 
-        覆盖两种来源：按码点切分产生的孤立附加符残段（``['ɛ', '̃']``），
-        以及多码点但跨簇的字符。全为单码点且无延伸码点开头时直接为 False
-        （快路径，常规日/中/英/韩歌词永远走不到慢路径）。
+        覆盖按码点切分产生的孤立附加符残段（``['ɛ', '̃']``）。全为单码点
+        且无延伸码点开头时直接为 False（快路径，常规日/中/英/韩歌词永远
+        走不到慢路径）。
+
+        注意：**跨簇**的多码点字符（畸形 ``char="ab"``，恰好起始于簇边界）
+        不在处理范围——归一化只合并「起始位置落在簇内部」的字符；跨簇字符
+        在 explode→merge（自动注音管线）中会按簇边界拆开。
         """
         for c in self.characters:
             if len(c.char) == 1:
@@ -916,17 +920,15 @@ class Sentence:
             leader = group[0]
             last = group[-1]
             leader.char = "".join(p.char for p in group)
-            # 连结线并入的基字（非纯附加符）：leader 无节奏点数据时继承末件，
-            # 避免丢旧存档挂在后一基字上的轴
+            # 连结线并入的基字（非纯附加符）：leader 无时间戳时继承末件的
+            # 时间戳/注音（节奏点数取 max），避免丢旧存档挂在后一基字上的轴。
+            # 条件与 normalize_graphemes 的合并规则保持一致（审查反馈 #5：
+            # 不要求 leader.check_count == 0，只看有无时间戳）。
             dependents_all_marks = is_dependent_text(
                 "".join(p.char for p in group[1:])
             )
-            if (
-                not dependents_all_marks
-                and leader.check_count == 0
-                and not leader.timestamps
-            ):
-                leader.check_count = last.check_count
+            if not dependents_all_marks and not leader.timestamps:
+                leader.check_count = max(leader.check_count, last.check_count)
                 leader.timestamps = list(last.timestamps)
                 if leader.ruby is None:
                     leader.ruby = last.ruby

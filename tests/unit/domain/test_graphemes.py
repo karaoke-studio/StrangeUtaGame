@@ -161,6 +161,18 @@ class TestHelpers:
 
 class TestFastPathEquivalence:
     def test_fast_path_equals_slow_path(self):
-        # 快路径（全 < U+0300）与完整算法一致
+        # 快路径（全 < U+0300）与完整算法一致：断言加括号修复运算符优先级
+        # （原写法 `a == b if t else c` 恒为恒真式，审查反馈 #9）
         for text in ["hello world", "abc123 !?", ""]:
-            assert split_graphemes(text) == list(text) if text else split_graphemes(text) == []
+            assert split_graphemes(text) == (list(text) if text else [])
+
+    def test_slow_path_handwritten_matches_full(self):
+        # 慢路径（含 ≥ U+0300 码点）与手工分簇一致
+        cases = {
+            "あかい": ["あ", "か", "い"],
+            "ãb": ["ã", "b"],
+            "t͡ʃx": ["t͡ʃ", "x"],
+            "é̃!": ["é̃", "!"],
+        }
+        for text, expected in cases.items():
+            assert split_graphemes(text) == expected

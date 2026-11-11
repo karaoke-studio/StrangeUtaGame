@@ -224,9 +224,22 @@ class FindDialog(QDialog):
 
     def _find_all_matches(self, full_text: str, query: str):
         """返回 (matches, body_positions)。matches 为 [(start, end), ...] 用于导航/高亮；
-        body_positions 为过滤标签模式下的逐字符原文位置列表，普通模式为空列表。"""
+        body_positions 为过滤标签模式下的逐字符原文位置列表，普通模式为空列表。
+
+        mapping 是**按字素簇**的（一个视觉字符一条），而 ``visual_text.find``
+        返回**码点**偏移——多码点簇（ɛ̃/emoji+VS16）之后两者错位，须先换算
+        （审查反馈 #4：直接切片会取错映射项、替换错字符）。
+        """
         if self._filter_tags:
+            from strange_uta_game.backend.domain.graphemes import (
+                chars_to_offsets,
+                offset_to_index,
+                split_graphemes,
+            )
+
             visual_text, mapping = _build_stripped_mapping(full_text)
+            # 视觉串的簇起始偏移表：码点偏移 → 簇下标
+            cluster_offsets = chars_to_offsets(split_graphemes(visual_text))
             matches: list[tuple[int, int]] = []
             body_positions: list[list[int]] = []
             pos = 0
@@ -234,7 +247,9 @@ class FindDialog(QDialog):
                 idx = visual_text.find(query, pos)
                 if idx == -1:
                     break
-                positions = sorted(set(mapping[idx : idx + len(query)]))
+                c0 = offset_to_index(cluster_offsets, idx)
+                c1 = offset_to_index(cluster_offsets, idx + len(query) - 1)
+                positions = sorted(set(mapping[c0 : c1 + 1]))
                 body_positions.append(positions)
                 start = positions[0]
                 end = positions[-1] + 1
@@ -318,7 +333,8 @@ class FindDialog(QDialog):
 
         * 替换簇多于匹配位 → 多位各自分配一簇，剩余簇全写入最后一个匹配位
         * 替换簇少于匹配位 → 分配不到的匹配位直接删除
-        * 每个匹配位选中整个簇（UTF-16 长度），附加符不与基字拆开
+        * 每个匹配位选中整个簇（UTF-16 长度），附加符不与基字拆开；
+          锚点位置同样换算为 UTF-16 单位（astral 字符前移会错位，审查反馈 #4b）
         """
         from strange_uta_game.backend.domain.graphemes import (
             next_grapheme_end,
@@ -337,8 +353,10 @@ class FindDialog(QDialog):
             # 该匹配位是一个字素簇：选中其完整 UTF-16 长度
             cluster_end = next_grapheme_end(text, pos) if pos < len(text) else pos
             sel_len = len(text[pos:cluster_end].encode("utf-16-le")) // 2 or 1
+            # 锚点：码点偏移 → UTF-16 单元偏移（倒序处理，右侧改动不影响左侧）
+            utf16_pos = len(text[:pos].encode("utf-16-le")) // 2
             c = QTextCursor(doc)
-            c.setPosition(pos)
+            c.setPosition(utf16_pos)
             c.movePosition(
                 QTextCursor.MoveOperation.Right,
                 QTextCursor.MoveMode.KeepAnchor,
@@ -442,12 +460,16 @@ class FindDialog(QDialog):
         if not match_ranges:
             return text, 0
 
+        # 视觉串的簇偏移表：find 返回码点偏移，mapping 按簇（审查反馈 #4）
+        v_cluster_offsets = chars_to_offsets(split_graphemes(visual_text))
         units = split_graphemes(text)
         unit_offsets = chars_to_offsets(units)
         rep_units = split_graphemes(replacement)
         m = len(rep_units)
         for v_start, v_end in reversed(match_ranges):
-            positions = sorted(set(mapping[v_start:v_end]))
+            c0 = offset_to_index(v_cluster_offsets, v_start)
+            c1 = offset_to_index(v_cluster_offsets, v_end - 1)
+            positions = sorted(set(mapping[c0 : c1 + 1]))
             n = len(positions)
             threshold = min(n, m) - 1
             for i in range(n - 1, -1, -1):

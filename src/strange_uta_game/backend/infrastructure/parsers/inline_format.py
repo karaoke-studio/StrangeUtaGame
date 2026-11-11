@@ -1021,9 +1021,29 @@ def _parse_plain_segment(
     - 有 CP 无时间戳: [1]char
     - 有停顿点 CP 有时间戳: char[10|ts]
     - 有停顿点 CP 无时间戳: char[10]
+
+    ``[10]`` 语义按位置区分（与导出侧对齐）：
+    - 后跟**空白或无后文** → 停顿点标记，附着到前一字符（``ə[10] 下一词``）；
+      修复点：旧解析把后随空格误当成 ``[10]`` 的新字符（空格被标 cc=1+行尾、
+      停顿标记丢失）。
+    - 后跟非空白文本 → 行尾字符规格（``[10]▨`` 休止符行尾字，cc=1+is_line_end）。
     """
     pos = 0
     pending_tags: List[Tuple[Optional[str], int]] = []
+
+    def _attach_pause_marker(n_str: Optional[str], ts_ms: Optional[int]) -> bool:
+        """``[10]``/``[10|ts]`` 后跟空白（或无后文）时视为停顿点标记，附着到
+        前一字符。返回是否已消费。"""
+        if n_str != "10" or not characters:
+            return False
+        if pos < len(content) and not content[pos].isspace():
+            return False  # 后跟非空白文本：行尾字符规格（如 [10]▨）
+        last_char = characters[-1]
+        last_char.is_sentence_end = True
+        if ts_ms is not None:
+            last_char.sentence_end_ts = ts_ms
+        last_char.push_to_ruby()
+        return True
 
     while pos < len(content):
         # 尝试匹配带时间戳的 tag: [N|MM:SS:cc] 或 [MM:SS:cc]
@@ -1032,6 +1052,10 @@ def _parse_plain_segment(
             n_str = m.group(1)
             ts_ms = parse_timestamp(m.group(2))
             pos = m.end()
+
+            # 停顿点标记 [10|ts]：附着到前一字符，不吞后随文本
+            if _attach_pause_marker(n_str, ts_ms):
+                continue
 
             # 查看紧跟的文本（可能是多个字符，直到下一个 [ 或 {）
             if pos < len(content) and content[pos] not in "[{":
@@ -1127,6 +1151,10 @@ def _parse_plain_segment(
             if m_no_ts:
                 n_str = m_no_ts.group(1)
                 pos = m_no_ts.end()
+
+                # 停顿点标记 [10]：附着到前一字符，不吞后随文本
+                if _attach_pause_marker(n_str, None):
+                    continue
 
                 # 查看紧跟的文本字符（整簇消费，附加符不与基字拆开）
                 if pos < len(content) and content[pos] not in "[{":

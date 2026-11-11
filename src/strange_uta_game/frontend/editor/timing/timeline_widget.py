@@ -64,6 +64,17 @@ _WAVEFORM_MIN_DISPLAY_HEIGHT = 60
 _SPECTRUM_AXIS_W = 50
 
 
+
+def _has_multicodepoint_cluster(text: str) -> bool:
+    """文本是否含多码点字素簇（基字+附加符 / emoji 序列）。
+
+    迭代 str 只得到单码点串（``len(c) > 1`` 恒 False 的死条件），必须按簇比较。
+    """
+    from strange_uta_game.backend.domain.graphemes import grapheme_count
+
+    return grapheme_count(text) != len(text)
+
+
 class TimeTag(NamedTuple):
     """波形上一个时间标签的渲染 + 命中数据。
 
@@ -2273,22 +2284,30 @@ class WaveformDisplay(QWidget):
         声谱/双谱模式下底片更不透明——热力图颜色杂乱，需要更强的分离。
 
         含 IPA 的标签临时换用 IPA 字体（CJK 主字体跨字体回退无法锚定
-        附加符）；底片宽度由调用方按度量传入，此处仅绘制。
+        附加符）；底片几何按**实际绘制字体**的度量计算（审查反馈 #7：
+        IPA 字体的 ascent/descent 与基字体不同，用基字体度量会让附加符
+        越出底片）；底片宽度由调用方按同字体度量传入。
         """
         from strange_uta_game.backend.infrastructure.parsers.ipa import has_ipa_text
 
-        top = label_y - fm.ascent()
+        draw_font = None
+        if has_ipa_text(text) or _has_multicodepoint_cluster(text):
+            from strange_uta_game.frontend.font_utils import phonetic_lyrics_font
+
+            draw_font = phonetic_lyrics_font(painter.font())
+        fm_plate = QFontMetrics(draw_font) if draw_font is not None else fm
+        top = label_y - fm_plate.ascent()
         plate = QColor(theme.waveform_bg)
         plate.setAlpha(245 if self._display_mode in ("spectrum", "dual") else 225)
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(QBrush(plate))
-        painter.drawRoundedRect(QRect(x - 2, top - 1, text_w + 4, fm.height() + 1), 2, 2)
+        painter.drawRoundedRect(
+            QRect(x - 2, top - 1, text_w + 4, fm_plate.height() + 1), 2, 2
+        )
         painter.setPen(color)
-        if has_ipa_text(text) or any(len(c) > 1 for c in text):
-            from strange_uta_game.frontend.font_utils import phonetic_lyrics_font
-
+        if draw_font is not None:
             painter.save()
-            painter.setFont(phonetic_lyrics_font(painter.font()))
+            painter.setFont(draw_font)
             painter.drawText(x, label_y, text)
             painter.restore()
         else:
@@ -2390,7 +2409,7 @@ class WaveformDisplay(QWidget):
                         has_ipa_text,
                     )
 
-                    if has_ipa_text(text) or any(len(c) > 1 for c in text):
+                    if has_ipa_text(text) or _has_multicodepoint_cluster(text):
                         from strange_uta_game.frontend.font_utils import (
                             phonetic_lyrics_font,
                         )
