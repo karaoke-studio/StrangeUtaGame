@@ -123,11 +123,19 @@ def normalize_apostrophes(text: str) -> str:
 def get_syllable_start_offsets(word: str) -> Set[int]:
     """返回 word 内各音节首字母的偏移集合（始终含 0）。
 
-    使用 CMU 发音词典与离线 G2P，按音素分音节后映射回原词字母位置。
+    含 IPA 特有字符的词按 **IPA 音节规则**切分（``ipa_syllable_onset_offsets``）；
+    其余用 CMU 发音词典与离线 G2P，按音素分音节后映射回原词字母位置。
     无可靠发音/字母对应时保留整词；不把排版断字当作发音音节。
     底层任何异常（词典 IO、模型损坏等）同样退化为整词——本入口被歌词
     导入与自动打轴调用，不允许向用户数据路径抛异常。
     """
+    try:
+        from .ipa import ipa_syllable_onset_offsets, is_ipa_word
+
+        if is_ipa_word(word):
+            return ipa_syllable_onset_offsets(word)
+    except Exception:
+        pass
     try:
         from .english_syllables import analyze_english_word
 
@@ -148,18 +156,41 @@ def _extend_past_trailing_commas(text: str, end: int) -> int:
 
 
 def find_english_words(text: str) -> List[Tuple[int, int, str]]:
-    """在文本中定位所有英文单词。
+    """在文本中定位所有英文单词（**含 IPA 词**）。
 
     #11：在分词前先把 curly/全角撇号规范化为 ASCII，保证
     `what's`、`don't` 等缩写能被视为一个完整单词（返回的 start/end 索引
     与 normalize 后的字符串对齐——由于 translate 是 1:1 字符映射，
     原字符串的位置也等同有效）。
 
+    IPA 词（含 IPA 特有字符的最大连续语音段，见 ``ipa.find_ipa_words``）
+    作为整词加入结果；IPA 词内部的 ASCII 字母片段（如 ``wɜːld`` 里的
+    ``ld``）不再单独视为英文词——否则会被 e2k 注上字母名假名读音、
+    并在词中段自动打停顿点。
+
     Returns:
         (start_idx, end_idx, word) 元组列表（end 为 exclusive）。
+        需要区分英文词 / IPA 词时用 ``ipa.is_ipa_word(word)`` 判断。
     """
     normalized = normalize_apostrophes(text)
     results = []
     for m in _ENGLISH_WORD_RE.finditer(normalized):
         results.append((m.start(), m.end(), m.group()))
-    return results
+
+    try:
+        from .ipa import find_ipa_words
+
+        ipa_words = find_ipa_words(text)
+    except Exception:
+        ipa_words = []
+    if not ipa_words:
+        return results
+
+    filtered = [
+        (s, e, w)
+        for s, e, w in results
+        if not any(s >= a and e <= b for a, b, _ in ipa_words)
+    ]
+    filtered.extend(ipa_words)
+    filtered.sort(key=lambda item: (item[0], item[1]))
+    return filtered

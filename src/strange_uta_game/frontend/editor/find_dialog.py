@@ -41,6 +41,8 @@ def _build_stripped_mapping(text: str):
     """
     visual: list[str] = []
     mapping: list[int] = []
+    from strange_uta_game.backend.domain.graphemes import next_grapheme_end, split_graphemes
+
     i = 0
     while i < len(text):
         si_m = _STRIP_SINGER_RE.match(text, i)
@@ -60,15 +62,19 @@ def _build_stripped_mapping(text: str):
                 sep_idx = inner.find("||")
                 if sep_idx != -1:
                     orig_text = inner[:sep_idx]
-                    for j, c in enumerate(orig_text):
-                        visual.append(c)
-                        mapping.append(i + 1 + j)
+                    # 原文按字素簇：ɛ̃/t͡ʃ 是一个视觉字符
+                    pos = 0
+                    for unit in split_graphemes(orig_text):
+                        visual.append(unit)
+                        mapping.append(i + 1 + pos)
+                        pos += len(unit)
                     i = close + 1
                     continue
 
-        visual.append(text[i])
+        cluster_end = next_grapheme_end(text, i)
+        visual.append(text[i:cluster_end])
         mapping.append(i)
-        i += 1
+        i = cluster_end
 
     return "".join(visual), mapping
 
@@ -308,27 +314,42 @@ class FindDialog(QDialog):
     def _apply_body_replacement(
         doc, positions: list[int], replacement: str
     ) -> QTextCursor:
-        """逐正文字符位写入替换文本（过滤标签模式专用），纳入一个撤销块。
+        """逐正文**字素簇**位写入替换文本（过滤标签模式专用），一个撤销块。
 
-        * 替换字符多于匹配位 → 多位各自分配一字符，剩余字符全写入最后一个匹配位
-        * 替换字符少于匹配位 → 分配不到的匹配位直接删除
+        * 替换簇多于匹配位 → 多位各自分配一簇，剩余簇全写入最后一个匹配位
+        * 替换簇少于匹配位 → 分配不到的匹配位直接删除
+        * 每个匹配位选中整个簇（UTF-16 长度），附加符不与基字拆开
         """
+        from strange_uta_game.backend.domain.graphemes import (
+            next_grapheme_end,
+            split_graphemes,
+        )
+
+        text = doc.toPlainText()
         n = len(positions)
-        m = len(replacement)
+        rep_units = split_graphemes(replacement)
+        m = len(rep_units)
         cursor = QTextCursor(doc)
         cursor.beginEditBlock()
         threshold = min(n, m) - 1
         for i in range(n - 1, -1, -1):
             pos = positions[i]
+            # 该匹配位是一个字素簇：选中其完整 UTF-16 长度
+            cluster_end = next_grapheme_end(text, pos) if pos < len(text) else pos
+            sel_len = len(text[pos:cluster_end].encode("utf-16-le")) // 2 or 1
             c = QTextCursor(doc)
             c.setPosition(pos)
-            c.movePosition(QTextCursor.MoveOperation.Right, QTextCursor.MoveMode.KeepAnchor, 1)
+            c.movePosition(
+                QTextCursor.MoveOperation.Right,
+                QTextCursor.MoveMode.KeepAnchor,
+                max(1, sel_len),
+            )
             if i >= m:
                 c.removeSelectedText()
             elif i == threshold:
-                c.insertText(replacement[i:])
+                c.insertText("".join(rep_units[i:]))
             else:
-                c.insertText(replacement[i])
+                c.insertText(rep_units[i])
         cursor.endEditBlock()
         return cursor
 
@@ -397,7 +418,16 @@ class FindDialog(QDialog):
         self._on_search()
 
     def _replace_all_with_filter(self, text: str, query: str, replacement: str):
-        """过滤标签模式下执行全部替换，返回 (new_text, count)。"""
+        """过滤标签模式下执行全部替换，返回 (new_text, count)。
+
+        替换单位是**字素簇**（mapping 的位置都是簇起点）：附加符不与基字拆开。
+        """
+        from strange_uta_game.backend.domain.graphemes import (
+            chars_to_offsets,
+            offset_to_index,
+            split_graphemes,
+        )
+
         visual_text, mapping = _build_stripped_mapping(text)
 
         match_ranges: list[tuple[int, int]] = []
@@ -412,22 +442,26 @@ class FindDialog(QDialog):
         if not match_ranges:
             return text, 0
 
-        m = len(replacement)
-        result = list(text)
+        units = split_graphemes(text)
+        unit_offsets = chars_to_offsets(units)
+        rep_units = split_graphemes(replacement)
+        m = len(rep_units)
         for v_start, v_end in reversed(match_ranges):
             positions = sorted(set(mapping[v_start:v_end]))
             n = len(positions)
             threshold = min(n, m) - 1
             for i in range(n - 1, -1, -1):
-                p = positions[i]
+                ui = offset_to_index(unit_offsets, positions[i])
+                if ui >= len(units):
+                    continue
                 if i >= m:
-                    result[p] = ""
+                    units[ui] = ""
                 elif i == threshold:
-                    result[p] = replacement[i:]
+                    units[ui] = "".join(rep_units[i:])
                 else:
-                    result[p] = replacement[i]
+                    units[ui] = rep_units[i]
 
-        return "".join(result), len(match_ranges)
+        return "".join(units), len(match_ranges)
 
     # ─── highlights ────────────────────────────────────────────
 

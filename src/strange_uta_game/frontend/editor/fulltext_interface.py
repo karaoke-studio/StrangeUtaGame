@@ -851,7 +851,13 @@ class RubyInterface(QWidget):
         if not block.isValid():
             return
         cursor = self.text_edit.textCursor()
-        cursor.setPosition(block.position() + min(column, block.length() - 1))
+        # 列号是码点偏移，QTextCursor 用 UTF-16 单元偏移：astral 字符
+        # （emoji 等）下两者不同，须换算
+        line_text = block.text()
+        utf16_col = len(line_text[:column].encode("utf-16-le")) // 2
+        cursor.setPosition(
+            block.position() + min(utf16_col, max(0, block.length() - 1))
+        )
         self.text_edit.setTextCursor(cursor)
         self.text_edit.ensureCursorVisible()
         self.text_edit.setFocus()

@@ -110,7 +110,10 @@ def apply_entry_to_dialog_rows(dialog: Any, word: str, reading: str) -> bool:
     if parsed is None:
         return False
     per_char_parts, char_block_id = parsed
-    n = len(word)
+    # 按字素簇计数对齐（word 的簇可能多码点，如 ɛ̃/t͡ʃ）
+    from strange_uta_game.backend.domain.graphemes import grapheme_count
+
+    n = grapheme_count(word)
     if len(per_char_parts) != n:
         return False
 

@@ -499,8 +499,9 @@ class Character:
 
         mode:
           - "direct": 保留原文不分割，不足部分用占位符（停顿符）补齐
-          - "char": 按字符均分
-          - "mora": 按 mora 均分（小假名附属前一拍）
+          - "char": 按读音单位（字素簇）均分——附加符不与基字拆开
+          - "mora": 按 mora/音节均分（小假名、IPA 修饰符附属前一拍，
+            含 IPA 特有字符时按音节拆分）
 
         Returns:
             长度为 target_count 的字符串列表
@@ -519,19 +520,17 @@ class Character:
         if not clean:
             return [pause] * target_count
 
+        from strange_uta_game.backend.infrastructure.parsers.inline_format import (
+            distribute_ruby_chars_evenly,
+            split_into_moras,
+            split_ruby_units,
+        )
+
         if mode == "char":
-            from strange_uta_game.backend.infrastructure.parsers.inline_format import (
-                distribute_ruby_chars_evenly,
-            )
-            return distribute_ruby_chars_evenly(list(clean), target_count)
+            return distribute_ruby_chars_evenly(split_ruby_units(clean), target_count)
 
         # mode == "mora"
-        moras: List[str] = []
-        for ch in clean:
-            if ch in Character._SMALL_KANA and moras:
-                moras[-1] += ch
-            else:
-                moras.append(ch)
+        moras = split_into_moras(clean)
         if len(moras) >= target_count:
             head = moras[: target_count - 1]
             tail = "".join(moras[target_count - 1 :])

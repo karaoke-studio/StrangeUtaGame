@@ -218,8 +218,12 @@ def _krl_block_to_characters(block: str, singer_id: str) -> List[Character]:
     ruby_parts = [RubyPart(text=text if text else pause) for text in kana_parts]
     ruby = Ruby(parts=ruby_parts) if ruby_parts else None
     check_count = max(len(timestamps), len(ruby_parts), 1)
+    # 原文按字素簇拆分（ɛ̃/t͡ʃ 是一个字符）
+    from strange_uta_game.backend.domain.graphemes import split_graphemes
+
+    display_chars = split_graphemes(display)
     character = Character(
-        char=display[0],
+        char=display_chars[0],
         ruby=ruby,
         check_count=check_count,
         timestamps=timestamps[:check_count],
@@ -229,7 +233,7 @@ def _krl_block_to_characters(block: str, singer_id: str) -> List[Character]:
         character.set_check_count(check_count, ruby_split_mode="mora")
     character.push_to_ruby()
     characters = [character]
-    for display_char in display[1:]:
+    for display_char in display_chars[1:]:
         # A non-empty primary ruby layer is the only lossless signal that this
         # multi-character block represents a linked word.  Romaji-only blocks
         # can also be generated for kana mora combinations (e.g. きゃ); that
@@ -291,6 +295,13 @@ def sentence_from_kasugamuki(line: str, singer_id: str) -> Sentence:
             # Kirakara escape: the opening bracket is lyric text, not a role tag.
             literal = "【"
             consumed = 2
+        else:
+            # 普通字符：整簇消费（附加符不与基字拆开；{ 与时间戳标签不是
+            # 簇的延续，簇会在它们之前断开）
+            from strange_uta_game.backend.domain.graphemes import next_grapheme_end
+
+            consumed = next_grapheme_end(line, pos) - pos
+            literal = line[pos : pos + consumed]
 
         character = Character(
             char=literal,

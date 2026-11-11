@@ -35,6 +35,12 @@ from typing import Optional, List, Tuple
 from copy import deepcopy
 
 from strange_uta_game.backend.domain import Project
+from strange_uta_game.backend.domain.graphemes import (
+    chars_to_offsets,
+    grapheme_count,
+    offset_to_index,
+    split_graphemes,
+)
 from strange_uta_game.backend.domain.models import Character, Ruby, RubyPart
 from strange_uta_game.frontend.fluent_widgets import message_info, message_question
 from strange_uta_game.frontend.window_sizing import fit_to_screen
@@ -297,7 +303,7 @@ class BulkChangeDialog(QDialog):
         self._suppress_row_signals = True
         try:
             self._clear_rows()
-            for i, ch in enumerate(new_text):
+            for i, ch in enumerate(split_graphemes(new_text)):
                 if i < len(old_vals):
                     r_val, c_val, l_val = old_vals[i]
                 else:
@@ -371,16 +377,23 @@ class BulkChangeDialog(QDialog):
     # ---------- 匹配扫描 ----------
 
     def _iter_matches(self, word: str):
-        """生成 (sentence, start_pos) 非重叠匹配；空词返回空。"""
+        """生成 ``(sentence, char_idx, n_chars)`` 非重叠匹配；空词返回空。
+
+        文本按码点扫描（``sentence.text`` 的偏移），再映射到**字素簇字符**下标
+        与簇数——``Character.char`` 不再保证单码点，调用方按下标/簇数切片。
+        """
         if not self._project or not word:
             return
         w_len = len(word)
         for sentence in self._project.sentences:
             text = sentence.text
+            offsets = chars_to_offsets([c.char for c in sentence.characters])
             pos = 0
             while pos <= len(text) - w_len:
                 if text[pos : pos + w_len] == word:
-                    yield sentence, pos
+                    idx = offset_to_index(offsets, pos)
+                    end_idx = offset_to_index(offsets, pos + w_len - 1)
+                    yield sentence, idx, end_idx - idx + 1
                     pos += w_len
                 else:
                     pos += 1
@@ -409,10 +422,9 @@ class BulkChangeDialog(QDialog):
             return
 
         first = next(iter(self._iter_matches(word)), None)
-        w_len = len(word)
         if first is not None:
-            sentence, pos = first
-            chars = sentence.characters[pos : pos + w_len]
+            sentence, pos, n_chars = first
+            chars = sentence.characters[pos : pos + n_chars]
             new_text = "".join(c.char for c in chars)
             ruby_list = [
                 ",".join(p.text for p in c.ruby.parts)
@@ -425,14 +437,17 @@ class BulkChangeDialog(QDialog):
         else:
             # 无匹配：用搜索词 + fallback reading
             new_text = word
+            n_units = grapheme_count(word)
             if fallback_reading:
                 # 逐段保留头尾空格（实义注音字符），不做 strip。
                 parts = fallback_reading.split(",")
-                ruby_list = [parts[i] if i < len(parts) else "" for i in range(w_len)]
+                ruby_list = [
+                    parts[i] if i < len(parts) else "" for i in range(n_units)
+                ]
             else:
-                ruby_list = ["" for _ in range(w_len)]
-            check_list = ["1" for _ in range(w_len)]
-            linked_list = [False for _ in range(w_len)]
+                ruby_list = ["" for _ in range(n_units)]
+            check_list = ["1" for _ in range(n_units)]
+            linked_list = [False for _ in range(n_units)]
 
         self._suppress_new_chars_signal = True
         try:
@@ -459,7 +474,7 @@ class BulkChangeDialog(QDialog):
         per_char_ruby: List[Optional[Ruby]] = []
         per_char_check: List[int] = []
         per_char_linked: List[bool] = []
-        for i in range(len(new_text)):
+        for i in range(grapheme_count(new_text)):
             if i >= len(self._char_rows):
                 per_char_ruby.append(None)
                 per_char_check.append(1)
@@ -495,14 +510,16 @@ class BulkChangeDialog(QDialog):
 
         # 收集所有匹配（按 sentence 分组，位置升序）
         matches_by_sentence: dict = {}
-        for sentence, pos in self._iter_matches(word):
-            matches_by_sentence.setdefault(id(sentence), (sentence, []))[1].append(pos)
+        for sentence, idx, n_hit in self._iter_matches(word):
+            matches_by_sentence.setdefault(id(sentence), (sentence, []))[1].append(
+                (idx, n_hit)
+            )
         total_matches = sum(len(v[1]) for v in matches_by_sentence.values())
         if total_matches == 0:
             self.lbl_match.setText(self.tr("找到 0 处（无改动）"))
             return
 
-        same_len = len(new_text) == len(word)
+        same_len = grapheme_count(new_text) == grapheme_count(word)
         if not same_len:
             # 丢时间戳确认
             if not message_question(
@@ -511,7 +528,11 @@ class BulkChangeDialog(QDialog):
                 self.tr(
                     "替换后字符数 ({new}) 与搜索词 ({word}) 不同，\n"
                     "将丢失全部 {n} 处匹配的时间戳。是否继续？"
-                ).format(new=len(new_text), word=len(word), n=total_matches),
+                ).format(
+                    new=grapheme_count(new_text),
+                    word=grapheme_count(word),
+                    n=total_matches,
+                ),
                 yes_text=self.tr("是"),
                 no_text=self.tr("否"),
             ):
@@ -522,7 +543,7 @@ class BulkChangeDialog(QDialog):
 
         self._linked_failures = []
         changed = 0
-        word_len = len(word)
+        new_units = split_graphemes(new_text)
 
         # 以 project.sentences 的索引记录失败位置，便于 UI 定位
         sentence_idx_map = {id(s): i for i, s in enumerate(self._project.sentences)}
@@ -531,8 +552,8 @@ class BulkChangeDialog(QDialog):
             s_idx = sentence_idx_map.get(id(sentence), -1)
             if same_len:
                 # 原地修改，正向遍历即可（长度不变，索引稳定）
-                for pos in positions:
-                    for i, ch_str in enumerate(new_text):
+                for pos, n_hit in positions:
+                    for i, ch_str in enumerate(new_units[:n_hit]):
                         ci = pos + i
                         if ci >= len(sentence.characters):
                             break
@@ -564,15 +585,15 @@ class BulkChangeDialog(QDialog):
                     changed += 1
             else:
                 # 替换 slice，必须倒序以保持前序位置稳定
-                for pos in sorted(positions, reverse=True):
-                    old_chars = sentence.characters[pos : pos + word_len]
+                for pos, n_hit in sorted(positions, reverse=True):
+                    old_chars = sentence.characters[pos : pos + n_hit]
                     if not old_chars:
                         continue
                     old_last_is_sentence_end = old_chars[-1].is_sentence_end
                     old_last_is_line_end = old_chars[-1].is_line_end
                     singer_id = old_chars[0].singer_id
                     new_chars = []
-                    for i, ch_str in enumerate(new_text):
+                    for i, ch_str in enumerate(new_units):
                         # per_char_ruby 每次新建独立 Ruby 对象避免共享
                         src_ruby = per_char_ruby[i]
                         ruby_copy = (
@@ -617,7 +638,7 @@ class BulkChangeDialog(QDialog):
                             new_ch.linked_to_next = False
                         else:
                             new_ch.linked_to_next = req_linked
-                    sentence.characters[pos : pos + word_len] = new_chars
+                    sentence.characters[pos : pos + n_hit] = new_chars
                     changed += 1
 
         # 注册到词典（传入连词信息，保留连词块结构）

@@ -80,6 +80,7 @@ from strange_uta_game.backend.domain import (
     Sentence,
     Singer,
 )
+from strange_uta_game.backend.domain.graphemes import split_graphemes
 
 
 def _get_ruby_split_mode() -> str:
@@ -518,7 +519,7 @@ class ModifyCharacterDialog(QDialog):
             if w is not None:
                 w.deleteLater()
         self._char_rows.clear()
-        for i, ch in enumerate(new_text):
+        for i, ch in enumerate(split_graphemes(new_text)):
             if i < len(old_vals):
                 r_val, c_val, l_val = old_vals[i]
             else:
@@ -578,12 +579,14 @@ class ModifyCharacterDialog(QDialog):
         new_text = self.edit_new_chars.text()
         if not new_text.strip():
             return
+        # 按字素簇切分（char 可能是多个码点的簇，如 "ɛ̃" "t͡ʃ"）
+        new_units = split_graphemes(new_text)
 
         # 收集每行值：ruby / check_count / linked_to_next
         per_char_ruby = []
         per_char_check = []
         per_char_linked_req = []  # 用户请求的 linked_to_next
-        for i in range(len(new_text)):
+        for i in range(len(new_units)):
             if i >= len(self._char_rows):
                 per_char_ruby.append(None)
                 per_char_check.append(1)
@@ -605,9 +608,9 @@ class ModifyCharacterDialog(QDialog):
 
         self._linked_failures = []
 
-        if len(new_text) == len(old_chars):
+        if len(new_units) == len(old_chars):
             # 字符数不变 → 原地修改，保留 timestamps 和 offset
-            for i, ch_str in enumerate(new_text):
+            for i, ch_str in enumerate(new_units):
                 tgt = old_chars[i]
                 tgt.char = ch_str
                 # 已配套 set_ruby 替换，force=True 安全（无 mora 退化）
@@ -623,7 +626,7 @@ class ModifyCharacterDialog(QDialog):
         else:
             # 字符数变化 → 替换 slice（无法保留 timestamps）
             new_chars = []
-            for i, ch_str in enumerate(new_text):
+            for i, ch_str in enumerate(new_units):
                 new_ch = Character(
                     char=ch_str,
                     ruby=per_char_ruby[i],
@@ -705,11 +708,13 @@ def _build_guide_chars(sentence, char_idx, symbol, count, duration_ms, reverse):
     ref_ts = ref_char.timestamps[0] if ref_char.timestamps else None
     clamped = False
     guide_chars = []
+    # 符号按字素簇拆分（emoji＋变体选择符 / 多码点符号是一个字符）
+    symbol_units = split_graphemes(symbol)
     for i in range(count):
-        for j, ch_str in enumerate(symbol):
+        for j, ch_str in enumerate(symbol_units):
             is_first_of_symbol = j == 0
             is_last_symbol = i == count - 1
-            is_last_char_of_last_symbol = (j == len(symbol) - 1) and is_last_symbol
+            is_last_char_of_last_symbol = (j == len(symbol_units) - 1) and is_last_symbol
             new_ch = Character(
                 char=ch_str,
                 ruby=None,
@@ -1272,7 +1277,7 @@ class CharEditDialog(QDialog):
             if w is not None:
                 w.deleteLater()
         self._char_rows.clear()
-        for i, ch in enumerate(new_text):
+        for i, ch in enumerate(split_graphemes(new_text)):
             if i < len(old_vals):
                 r_val, c_val, l_val = old_vals[i]
             else:
@@ -2598,7 +2603,7 @@ def _build_guide_chars_for_interlude(
     最后一个字符 is_sentence_end=True，sentence_end_ts = gap_end_ms - back_margin_ms；
     所有字符 cc=1，时间戳在区间内均匀分配。
     """
-    chars = list(text)
+    chars = split_graphemes(text)  # 字素簇：附加符不与基字拆开
     n = len(chars)
     if n == 0:
         return []

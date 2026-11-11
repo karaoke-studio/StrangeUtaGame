@@ -1352,9 +1352,12 @@ def _aux_sentence_from_track(
             if seg_end is not None:
                 ends.append(int(seg_end))
                 previous_end = int(seg_end)
-            times = _distribute(seg_begin, seg_end, len(text))
-            for char_index, char_text in enumerate(text):
-                is_segment_end = char_index == len(text) - 1
+            from strange_uta_game.backend.domain.graphemes import split_graphemes
+
+            seg_clusters = split_graphemes(text)
+            times = _distribute(seg_begin, seg_end, len(seg_clusters))
+            for char_index, char_text in enumerate(seg_clusters):
+                is_segment_end = char_index == len(seg_clusters) - 1
                 timestamp = times[char_index]
                 char = Character(
                     char=char_text,

@@ -1,9 +1,17 @@
 """自动检查服务。
 
 分析歌词文本，计算节奏点数量，生成注音。
+
+**字素簇与码点视图**：``Character.char`` 以字素簇为单位（多码点音段如
+``ɛ̃`` ``t͡ʃ`` 是一个字符），而本服务内部的大量逻辑（分析器偏移、正则
+匹配、check_counts 下标）按**码点**索引。两者通过 :func:`codepoint_view`
+桥接：入口处把句子临时拆成码点视图（``Sentence.explode_graphemes``），
+跑完既有管线后在出口合并回字素簇（``merge_grapheme_pieces``）。对全为
+单码点字符的句子（常规日/中/英/韩歌词）拆分是零开销 no-op。
 """
 
-from typing import List, Tuple, Optional, Dict, Any
+import contextlib
+from typing import Iterator, List, Tuple, Optional, Dict, Any
 from dataclasses import dataclass
 
 from strange_uta_game.backend.domain import (
@@ -105,6 +113,69 @@ def is_chinese_lyrics(text: str) -> bool:
     if not text:
         return False
     return not any(c in _KANA_DETECTION_CHARS for c in text)
+
+
+# ──────────────────────────────────────────────
+# 码点视图（字素簇 ⇄ 码点 桥接）
+# ──────────────────────────────────────────────
+
+# id(sentence) → [sentence(强引用), spans, 嵌套深度]
+_CP_VIEW_REGISTRY: Dict[int, List[Any]] = {}
+
+
+@contextlib.contextmanager
+def codepoint_view(sentence: "Sentence") -> Iterator[Optional[List[List[int]]]]:
+    """把句子临时置为**码点视图**（每个码点一个 Character），退出时还原。
+
+    - 多码点簇字符拆成码点件（首件带数据，簇尾标记归末件）；
+    - 孤立的附加符残段本来已是单码点，无需拆分；
+    - 全为单码点且无残段时完全不改动（零开销）。
+    - 可重入：嵌套调用共享同一视图，最外层退出时才合并还原。
+
+    异常安全：finally 中还原；还原失败时回退到按簇边界归一化。
+    """
+    key = id(sentence)
+    entry = _CP_VIEW_REGISTRY.get(key)
+    if entry is not None:
+        entry[2] += 1
+        try:
+            yield entry[1]
+        finally:
+            entry[2] -= 1
+        return
+    spans = sentence.explode_graphemes()
+    _CP_VIEW_REGISTRY[key] = [sentence, spans, 1]
+    try:
+        yield spans
+    finally:
+        _CP_VIEW_REGISTRY.pop(key, None)
+        try:
+            if spans is not None:
+                sentence.merge_grapheme_pieces(spans)
+            else:
+                sentence.normalize_graphemes()
+        except Exception:
+            # 还原是结构性操作，失败意味着数据已不可信；按簇边界兜底
+            try:
+                sentence.normalize_graphemes()
+            except Exception:
+                pass
+
+
+def _expand_view_indices(
+    spans: Optional[List[List[int]]], indices: Optional[set]
+) -> Optional[set]:
+    """把字素簇下标集合映射到码点视图下标集合（视图为恒等时原样返回）。"""
+    if indices is None or spans is None:
+        return indices
+    out: set = set()
+    n = len(spans)
+    for i in indices:
+        if isinstance(i, int) and 0 <= i < n:
+            out.update(spans[i])
+        else:
+            out.add(i)
+    return out
 
 
 def is_korean_lyrics(text: str) -> bool:
@@ -451,7 +522,13 @@ class AutoCheckService:
             return ruby_results, set()
         e2k_covered: set[int] = set()
         overrides: List[RubyResult] = []
+        from strange_uta_game.backend.infrastructure.parsers.ipa import (
+            is_ipa_word,
+        )
+
         for start, end, word in find_english_words(text):
+            if is_ipa_word(word):
+                continue  # IPA 音标不是英文拼写，不走 e2k 片假名转写
             span = set(range(start, end))
             # 跳过已被用户词典（多字符跨英/非英复合词）占用的范围
             if span & dict_covered:
@@ -1214,11 +1291,13 @@ class AutoCheckService:
                     # 主开关关闭，或行首空格：不打 CP
                     check_counts[i] = 0
                 else:
-                    prev_ct = (
-                        get_char_type(chars[i - 1])
-                        if len(chars[i - 1]) == 1
-                        else CharType.OTHER
-                    )
+                    # 上下文类型看空格前的第一个**非修饰符**字符——
+                    # 组合附加符残段（码点视图）与 IPA 修饰符（ʰ ː …）
+                    # 不改变空格的语境归类
+                    j = i - 1
+                    while j > 0 and get_char_type(chars[j]) == CharType.MODIFIER:
+                        j -= 1
+                    prev_ct = get_char_type(chars[j])
                     if prev_ct in (
                         CharType.HIRAGANA,
                         CharType.KATAKANA,
@@ -1285,6 +1364,21 @@ class AutoCheckService:
         return [int(i in starts) for i in range(len(word))]
 
     def _apply_english_and_endpoints(
+        self,
+        sentence: Sentence,
+        check_counts: List[int],
+        *,
+        preserve_english_rubies: bool = False,
+    ) -> None:
+        """公开入口（字素簇安全）：以码点视图执行，``check_counts`` 按**码点**
+        下标传入（与 ``len(list(sentence.text))`` 对齐——调用方维持既有构造方式）。
+        """
+        with codepoint_view(sentence):
+            self._apply_english_and_endpoints_impl(
+                sentence, check_counts, preserve_english_rubies=preserve_english_rubies
+            )
+
+    def _apply_english_and_endpoints_impl(
         self,
         sentence: Sentence,
         check_counts: List[int],
@@ -1410,6 +1504,15 @@ class AutoCheckService:
         sentence: Sentence,
         keep_existing_timetags: bool = True,
     ) -> None:
+        """中文模式入口（字素簇安全）。"""
+        with codepoint_view(sentence):
+            self._apply_chinese_to_sentence_impl(sentence, keep_existing_timetags)
+
+    def _apply_chinese_to_sentence_impl(
+        self,
+        sentence: Sentence,
+        keep_existing_timetags: bool = True,
+    ) -> None:
         """中文歌词模式：按字符流计算节奏点。
 
         - 若 ``self._pinyin_analyzer`` 已提供，为每个汉字标注带声调拼音 ruby；
@@ -1486,6 +1589,15 @@ class AutoCheckService:
                     char.push_to_ruby()
 
     def _apply_korean_to_sentence(
+        self,
+        sentence: Sentence,
+        keep_existing_timetags: bool = True,
+    ) -> None:
+        """韩文模式入口（字素簇安全）。"""
+        with codepoint_view(sentence):
+            self._apply_korean_to_sentence_impl(sentence, keep_existing_timetags)
+
+    def _apply_korean_to_sentence_impl(
         self,
         sentence: Sentence,
         keep_existing_timetags: bool = True,
@@ -1599,8 +1711,9 @@ class AutoCheckService:
 
         split_config = split_config or SplitConfig()
 
-        # 拆分文本
-        chars, check_counts = split_text(text, split_config)
+        # 拆分文本（码点视图：分析器偏移 / find_english_words / check_counts
+        # 均按码点索引，与 explode_graphemes 后的 Character 一一对应）
+        chars, check_counts = split_text(text, split_config, by_codepoint=True)
 
         # split_text 会按既有规则合并连续空白（混有全角空格时保留为一个全角
         # 空格）。后续分析器和所有基于字符索引的处理必须使用同一份规范化文本，
@@ -2228,6 +2341,33 @@ class AutoCheckService:
         restrict_indices: Optional[set] = None,
         skip_romanize: bool = False,
     ) -> None:
+        """分析并应用自动检查结果到句子（字素簇安全的公开入口）。
+
+        内部以码点视图执行既有管线（见 :func:`codepoint_view`）；
+        ``restrict_indices`` 按**字素簇下标**传入，进入视图前展开。
+        其余参数语义见 :meth:`_apply_to_sentence_impl`。
+        """
+        with codepoint_view(sentence) as spans:
+            self._apply_to_sentence_impl(
+                sentence,
+                split_config,
+                keep_existing_timetags,
+                only_noruby,
+                apply_user_dict,
+                _expand_view_indices(spans, restrict_indices),
+                skip_romanize,
+            )
+
+    def _apply_to_sentence_impl(
+        self,
+        sentence: Sentence,
+        split_config: Optional[SplitConfig] = None,
+        keep_existing_timetags: bool = True,
+        only_noruby: bool = False,
+        apply_user_dict: bool = True,
+        restrict_indices: Optional[set] = None,
+        skip_romanize: bool = False,
+    ) -> None:
         """分析并应用自动检查结果到句子
 
         构建新的 Character 对象列表，每个字符直接携带自己的 Ruby。
@@ -2483,9 +2623,10 @@ class AutoCheckService:
         for i, sentence in enumerate(sentences):
             if getattr(sentence, "aux_role", ""):
                 continue
-            before = sum(len(part.text) for ch in sentence.characters if ch.ruby for part in ch.ruby.parts)
-            self._romanize_sentence_ruby(sentence)
-            after = sum(len(part.text) for ch in sentence.characters if ch.ruby for part in ch.ruby.parts)
+            with codepoint_view(sentence):
+                before = sum(len(part.text) for ch in sentence.characters if ch.ruby for part in ch.ruby.parts)
+                self._romanize_sentence_ruby(sentence)
+                after = sum(len(part.text) for ch in sentence.characters if ch.ruby for part in ch.ruby.parts)
             if before != after:
                 changed += 1
             if progress_callback is not None:
@@ -2493,6 +2634,16 @@ class AutoCheckService:
         return changed
 
     def _apply_user_dictionary_to_sentence(
+        self,
+        sentence: Sentence,
+        morpheme_ranges: Optional[Dict[int, Tuple[int, int]]] = None,
+    ) -> None:
+        """Phase 5 入口（字素簇安全）：以码点视图执行，``morpheme_ranges``
+        的 char_idx 按**码点**下标传入（与 analyze_sentence 的结果同空间）。"""
+        with codepoint_view(sentence):
+            self._apply_user_dictionary_to_sentence_impl(sentence, morpheme_ranges)
+
+    def _apply_user_dictionary_to_sentence_impl(
         self,
         sentence: Sentence,
         morpheme_ranges: Optional[Dict[int, Tuple[int, int]]] = None,
@@ -2795,15 +2946,35 @@ class AutoCheckService:
         for i, sentence in enumerate(sentences):
             if getattr(sentence, "aux_role", ""):
                 continue
-            results = self.analyze_sentence(sentence)
-            morpheme_ranges = _build_compound_ranges(results) or None
-            self._apply_user_dictionary_to_sentence(sentence, morpheme_ranges=morpheme_ranges)
-            if not skip_romanize:
-                self._romanize_sentence_ruby(sentence)
+            # 码点视图包住「分析 + 词典 + 罗马音」整段，morpheme_ranges 的
+            # 码点下标在视图内与 characters 对齐
+            with codepoint_view(sentence):
+                results = self.analyze_sentence(sentence)
+                morpheme_ranges = _build_compound_ranges(results) or None
+                self._apply_user_dictionary_to_sentence_impl(
+                    sentence, morpheme_ranges=morpheme_ranges
+                )
+                if not skip_romanize:
+                    self._romanize_sentence_ruby(sentence)
             if progress_callback is not None:
                 progress_callback("应用用户词典", i + 1, total)
 
     def update_checkpoints_from_rubies(
+        self,
+        sentence: Sentence,
+        split_config: Optional[SplitConfig] = None,
+        *,
+        preserve_ruby_segments: bool = False,
+    ) -> None:
+        """公开入口（字素簇安全）：以码点视图执行，退出时合并还原。"""
+        with codepoint_view(sentence):
+            self._update_checkpoints_from_rubies_impl(
+                sentence,
+                split_config,
+                preserve_ruby_segments=preserve_ruby_segments,
+            )
+
+    def _update_checkpoints_from_rubies_impl(
         self,
         sentence: Sentence,
         split_config: Optional[SplitConfig] = None,
@@ -2828,8 +2999,10 @@ class AutoCheckService:
 
         split_config = split_config or SplitConfig()
 
-        # 使用 text_splitter 获取默认节奏点数
-        _, check_counts = split_text(sentence.text, split_config)
+        # 使用 text_splitter 获取默认节奏点数（码点视图，见 analyze_sentence）
+        _, check_counts = split_text(
+            sentence.text, split_config, by_codepoint=True
+        )
 
         # 确保长度匹配
         while len(check_counts) < len(sentence.characters):

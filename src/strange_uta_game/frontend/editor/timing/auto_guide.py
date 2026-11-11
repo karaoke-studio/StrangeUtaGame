@@ -162,15 +162,19 @@ def candidate_preflight(candidate: AutoGuideCandidate, params: AutoGuideParams) 
 
 
 def _build_chars(candidate: AutoGuideCandidate, params: AutoGuideParams) -> list[Character]:
+    from strange_uta_game.backend.domain.graphemes import split_graphemes
+
     check = candidate_preflight(candidate, params)
     if not check["executable"]:
         return []
     duration_ms = check["duration_ms"]
     result: list[Character] = []
+    # 符号按字素簇拆分（emoji＋变体选择符 / 多码点符号是一个字符）
+    symbol_units = split_graphemes(params.symbol)
     for i in range(params.count):
-        for j, text_char in enumerate(params.symbol):
+        for j, text_char in enumerate(symbol_units):
             first_in_symbol = j == 0
-            last = i == params.count - 1 and j == len(params.symbol) - 1
+            last = i == params.count - 1 and j == len(symbol_units) - 1
             new_ch = Character(
                 char=text_char,
                 ruby=None,

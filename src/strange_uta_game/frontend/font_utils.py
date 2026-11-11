@@ -246,6 +246,87 @@ def resolve_font_family(family: str | None) -> str:
     return DEFAULT_FONT_FAMILY
 
 
+# ──────────────────────────────────────────────
+# IPA（国际音标）字体策略
+# ──────────────────────────────────────────────
+# 歌词主字体多为 CJK 字体（微软雅黑等），其拉丁字形与 IPA 附加符常分属不同
+# 回退字体——跨字体无法做 GPOS 锚定：附加符漂移到基字侧边，重音符
+# （ˈ ˌ，Tahoma 等字体中为零宽字形）与后字重叠。因此含 IPA 的文本段改用
+# 「IPA 字体」整段排版：要求基字与附加符同字体、带 GPOS mark 锚定、
+# 修饰字母非零宽。SIL 系（Charis/Doulos/Gentium/Andika）是 IPA 的金标准
+# 字体，排在最前（仅在用户自行安装时命中）；各平台系统字体随后兜底。
+_IPA_FONT_CANDIDATES: dict[str, tuple[str, ...]] = {
+    "win32": (
+        "Charis SIL", "Doulos SIL", "Gentium Plus", "Andika",
+        "Segoe UI", "Arial", "Times New Roman", "Cambria", "Calibri",
+        "Noto Sans", "DejaVu Sans",
+        # 不含 Tahoma：其 IPA 重音/长音符是零宽字形，会与后字重叠
+    ),
+    "darwin": (
+        "Charis SIL", "Doulos SIL", "Gentium Plus", "Andika",
+        "Lucida Grande", "Arial Unicode MS", "Arial", "Times New Roman",
+        "Menlo", "Noto Sans", "DejaVu Sans",
+    ),
+    "other": (
+        "Charis SIL", "Doulos SIL", "Gentium Plus", "Andika",
+        "Noto Sans", "DejaVu Sans", "FreeSans", "Liberation Sans",
+    ),
+}
+
+_ipa_font_override = ""
+
+
+def ipa_font_candidates() -> tuple[str, ...]:
+    """当前平台按优先级排列的 IPA 字体候选族名。"""
+    if sys.platform.startswith("win"):
+        return _IPA_FONT_CANDIDATES["win32"]
+    if sys.platform == "darwin":
+        return _IPA_FONT_CANDIDATES["darwin"]
+    return _IPA_FONT_CANDIDATES["other"]
+
+
+def resolve_ipa_font_family(family: str | None) -> str:
+    """解析用户 IPA 字体设置；``auto``/空/未安装时返回空串（按候选链自动）。"""
+    if not family or family.casefold() == "auto":
+        return ""
+    return font_cache.installed_family_map().get(family.casefold(), "")
+
+
+def set_ipa_font_override(family: str | None) -> str:
+    """设置用户选择的 IPA 字体并返回实际覆盖值；空串表示自动。"""
+    global _ipa_font_override
+    _ipa_font_override = resolve_ipa_font_family(family)
+    return _ipa_font_override
+
+
+def ipa_font_family() -> str:
+    """当前生效的 IPA 字体族名（候选链中首个已安装者）；无可用者返回空串。"""
+    if _ipa_font_override:
+        return _ipa_font_override
+    installed = font_cache.installed_family_map()
+    for name in ipa_font_candidates():
+        resolved = installed.get(name.casefold())
+        if resolved:
+            return resolved
+    return ""
+
+
+def phonetic_lyrics_font(base: QFont) -> QFont:
+    """返回用于 IPA 文本段的字体：IPA 字体优先、原歌词字体链兜底。
+
+    语义见 :func:`lyrics_font`；仅在检测为 IPA/带附加符的文本段上使用，
+    其余文本仍用原字体，用户歌词字体设置不受影响。
+    """
+    ipa = ipa_font_family()
+    if not ipa:
+        return base
+    font = QFont(base)
+    families = [ipa] + [f for f in base.families() if f.casefold() != ipa.casefold()]
+    font.setFamilies(families)
+    font.setStyleName("")  # 重新解析族样式，避免把 CJK 族的 style 钉死
+    return pin_lyric_font_style(font)
+
+
 def make_ch_width_metrics(family: str | None, point_size: int = 16) -> tuple[QFontMetrics, str]:
     """构造用于字宽（ch）统计的 ``QFontMetrics``，并返回实际使用的字体族名。
 

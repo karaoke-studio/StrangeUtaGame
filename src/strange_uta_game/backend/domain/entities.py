@@ -15,6 +15,12 @@ from .models import (
     DomainError,
     ValidationError,
 )
+from .graphemes import (
+    grapheme_boundaries,
+    split_graphemes,
+    starts_with_extender,
+    is_dependent_text,
+)
 
 
 def _compute_complement_color(hex_color: str) -> str:
@@ -748,6 +754,202 @@ class Sentence:
         for char in self.characters:
             char.set_ruby(None)
 
+    # ── 字素簇归一化 ──
+
+    def needs_grapheme_normalization(self) -> bool:
+        """是否存在「不在字素簇边界起始」的字符（需要归一化合并）。
+
+        覆盖两种来源：按码点切分产生的孤立附加符残段（``['ɛ', '̃']``），
+        以及多码点但跨簇的字符。全为单码点且无延伸码点开头时直接为 False
+        （快路径，常规日/中/英/韩歌词永远走不到慢路径）。
+        """
+        for c in self.characters:
+            if len(c.char) == 1:
+                if starts_with_extender(c.char):
+                    return True
+            else:
+                return True  # 多码点：需要完整核对簇边界
+        return False
+
+    def normalize_graphemes(self) -> bool:
+        """把不在字素簇边界起始的字符并入前一字符，返回是否发生改动。
+
+        合并规则（**leader 优先**）：
+
+        - ``char``：拼接；
+        - ``check_count`` / ``timestamps`` / ``ruby``：取 leader 的；leader 完全
+          无节奏点数据且被并者是**连结线并入的基字**（非纯附加符）时，继承
+          其数据（保住旧存档里挂在后一基字上的时间戳）；
+        - 行尾/停顿点/连词标记（``linked_to_next`` ``is_line_end``
+          ``is_sentence_end`` ``sentence_end_ts``）：取簇内**最后一个**成员的值
+          （这些标记描述的是簇与后续内容的关系）；
+        - 演唱者 / 导唱标记：leader 的，leader 缺省时取簇内首个非空值。
+
+        行首的孤立附加符（无前驱可并）保持原样——数据保留，渲染层兜底。
+        """
+        chars = self.characters
+        if not self.needs_grapheme_normalization():
+            return False
+        boundaries = set(grapheme_boundaries(self.text))
+        had_line_end = any(c.is_line_end for c in chars)
+        merged: List[Character] = []
+        offset = 0
+        changed = False
+        for c in chars:
+            dependent = offset not in boundaries
+            if dependent and merged:
+                leader = merged[-1]
+                leader.char += c.char
+                pure_mark = is_dependent_text(c.char)
+                if not pure_mark and not leader.timestamps:
+                    # 连结线并入的基字：leader 无时间戳时继承（节奏点数取
+                    # max，ruby 在 leader 无注音时一并继承），避免丢轴
+                    if leader.check_count == 0:
+                        leader.check_count = c.check_count
+                    if leader.ruby is None:
+                        leader.ruby = c.ruby
+                    leader.timestamps = list(c.timestamps)
+                if leader.sentence_end_ts is None:
+                    leader.sentence_end_ts = c.sentence_end_ts
+                if not leader.singer_id:
+                    leader.singer_id = c.singer_id
+                leader.needs_guide = leader.needs_guide or c.needs_guide
+                leader.is_guide = leader.is_guide or c.is_guide
+                leader.force_singer_tag = leader.force_singer_tag or c.force_singer_tag
+                # 簇尾标记：取最后一个成员
+                leader.linked_to_next = c.linked_to_next
+                leader.is_line_end = leader.is_line_end or c.is_line_end
+                leader.is_sentence_end = leader.is_sentence_end or c.is_sentence_end
+                leader.push_to_ruby()
+                changed = True
+            else:
+                merged.append(c)
+            offset += len(c.char)
+        if changed:
+            self.characters = merged
+            if merged and had_line_end:
+                for c in merged:
+                    c.is_line_end = False
+                merged[-1].is_line_end = True
+        return changed
+
+    def explode_graphemes(self) -> Optional[List[List[int]]]:
+        """把多码点字符临时拆成单码点「码点视图」，返回映射。
+
+        Returns:
+            ``spans``：每个原字符对应的码点件下标列表；无可拆（全单码点）
+            时返回 ``None``（视图与原句完全一致，零开销）。
+
+        说明：
+            供自动注音等**按码点索引**的既有管线使用（配合
+            :meth:`merge_grapheme_pieces` 还原）。首码点件继承全部数据；
+            后续码点件为空壳（cc=0、簇内连词）；簇尾标记（行尾/停顿点/
+            连词）迁到最后一件；导唱/强插标签留在首件。
+        """
+        if all(len(c.char) == 1 for c in self.characters):
+            return None
+        pieces: List[Character] = []
+        spans: List[List[int]] = []
+        for c in self.characters:
+            cps = list(c.char)
+            span: List[int] = []
+            if len(cps) == 1:
+                span.append(len(pieces))
+                pieces.append(c)
+                spans.append(span)
+                continue
+            # 首件：原对象（保数据），摘下簇尾标记（先快照再改——first 就是 c）
+            tail = (
+                c.is_line_end,
+                c.is_sentence_end,
+                c.sentence_end_ts,
+                c.linked_to_next,
+            )
+            first = c
+            first.char = cps[0]
+            first.is_line_end = False
+            first.is_sentence_end = False
+            first.sentence_end_ts = None
+            first.linked_to_next = True  # 簇内连成组
+            span.append(len(pieces))
+            pieces.append(first)
+            # 中间件 / 末件
+            for j in range(1, len(cps)):
+                is_last = j == len(cps) - 1
+                piece = Character(char=cps[j], check_count=0, singer_id=c.singer_id)
+                if is_last:
+                    piece.is_line_end = tail[0]
+                    piece.is_sentence_end = tail[1]
+                    piece.sentence_end_ts = tail[2]
+                    piece.linked_to_next = tail[3]
+                else:
+                    piece.linked_to_next = True
+                span.append(len(pieces))
+                pieces.append(piece)
+            spans.append(span)
+        self.characters = pieces
+        return spans
+
+    def merge_grapheme_pieces(self, spans: Optional[List[List[int]]]) -> None:
+        """把 :meth:`explode_graphemes` 的码点视图合并回字素簇字符。
+
+        与 ``explode_graphemes`` 互逆；码点件在管线中可能已被原地修改
+        （check_count / timestamps / ruby 等），合并时**首件优先**、簇尾标记
+        取末件。若管线改变了字符数量（当前流程不会），退化为
+        :meth:`normalize_graphemes` 的簇边界合并。
+        """
+        if not spans:
+            return
+        n_pieces = sum(len(s) for s in spans)
+        if len(self.characters) != n_pieces:
+            # 防御：管线改写了结构，按簇边界归一化兜底
+            self.normalize_graphemes()
+            return
+        merged: List[Character] = []
+        idx = 0
+        for span in spans:
+            group = self.characters[idx : idx + len(span)]
+            idx += len(span)
+            if len(group) == 1:
+                merged.append(group[0])
+                continue
+            leader = group[0]
+            last = group[-1]
+            leader.char = "".join(p.char for p in group)
+            # 连结线并入的基字（非纯附加符）：leader 无节奏点数据时继承末件，
+            # 避免丢旧存档挂在后一基字上的轴
+            dependents_all_marks = is_dependent_text(
+                "".join(p.char for p in group[1:])
+            )
+            if (
+                not dependents_all_marks
+                and leader.check_count == 0
+                and not leader.timestamps
+            ):
+                leader.check_count = last.check_count
+                leader.timestamps = list(last.timestamps)
+                if leader.ruby is None:
+                    leader.ruby = last.ruby
+            if leader.sentence_end_ts is None:
+                leader.sentence_end_ts = last.sentence_end_ts
+            if not leader.singer_id:
+                leader.singer_id = last.singer_id
+            leader.linked_to_next = last.linked_to_next
+            leader.is_line_end = leader.is_line_end or last.is_line_end
+            leader.is_sentence_end = leader.is_sentence_end or last.is_sentence_end
+            for p in group[1:]:
+                leader.needs_guide = leader.needs_guide or p.needs_guide
+                leader.is_guide = leader.is_guide or p.is_guide
+                leader.force_singer_tag = leader.force_singer_tag or p.force_singer_tag
+            leader.push_to_ruby()
+            merged.append(leader)
+        self.characters = merged
+        # 行尾标记唯一性重建（合并后行尾必在最后一个字符上）
+        if merged and any(p.is_line_end for p in self.characters):
+            for p in self.characters:
+                p.is_line_end = False
+            merged[-1].is_line_end = True
+
     # ── 初始化辅助 ──
 
     @classmethod
@@ -756,16 +958,21 @@ class Sentence:
         text: str,
         singer_id: str,
         id: Optional[str] = None,
+        *,
+        by_codepoint: bool = False,
     ) -> "Sentence":
-        """从纯文本创建句子
+        """从纯文本创建句子。
 
-        自动拆分为单字符，设置默认 checkpoint 配置。
+        自动拆分为单字符（**字素簇**），设置默认 checkpoint 配置。
         最后一个字符标记为停顿点（check_count=1）。
 
         Args:
             text: 歌词文本
             singer_id: 演唱者 ID
             id: 可选的句子 ID
+            by_codepoint: True 时按码点拆分（供既有按码点索引的解析管线
+                使用——它们随后自行调用 :meth:`normalize_graphemes` 收口）。
+                默认按字素簇拆分。
 
         Returns:
             Sentence 实例
@@ -773,7 +980,7 @@ class Sentence:
         if not text:
             raise ValidationError("歌词文本不能为空")
 
-        chars_list = list(text)
+        chars_list = list(text) if by_codepoint else split_graphemes(text)
         characters = []
         for i, ch in enumerate(chars_list):
             is_last = i == len(chars_list) - 1

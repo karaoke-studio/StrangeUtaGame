@@ -31,6 +31,11 @@ from PyQt6.QtWidgets import QScrollBar, QWidget
 from qfluentwidgets import Action, RoundMenu
 
 from strange_uta_game.backend.domain import Character, Project, Ruby
+from strange_uta_game.backend.domain.graphemes import (
+    chars_to_offsets,
+    offset_to_index,
+    truncate_graphemes,
+)
 from strange_uta_game.frontend.perf_log import (
     log_elapsed,
     log_slow_method,
@@ -298,17 +303,21 @@ def _ruby_timed_span_maps(
     """计算单字及连词组的 Ruby 静态打轴区间，不包含任何走字状态。"""
     char_spans: dict[int, list[tuple[int, int]]] = {}
     group_spans: dict[int, list[tuple[int, int]]] = {}
+
+    def _resolve_fm(char_idx: int) -> QFontMetrics:
+        return fm(char_idx) if callable(fm) else fm
+
     for char_idx, character in enumerate(characters):
         if char_idx in linked_leader_groups or char_idx in linked_non_leader:
             continue
         if character.ruby and character.ruby.text:
             _, char_spans[char_idx] = _ruby_timed_spans(
-                fm, _ruby_timing_chunks(characters, [char_idx])
+                _resolve_fm(char_idx), _ruby_timing_chunks(characters, [char_idx])
             )
     for leader_idx, group in linked_leader_groups.items():
         if any(characters[char_idx].ruby for char_idx in group):
             _, group_spans[leader_idx] = _ruby_timed_spans(
-                fm, _ruby_timing_chunks(characters, group)
+                _resolve_fm(leader_idx), _ruby_timing_chunks(characters, group)
             )
     return char_spans, group_spans
 
@@ -404,15 +413,66 @@ def _ink_bounds(fm: QFontMetrics, text: str) -> tuple[int, int]:
     Qt 的 ``tightBoundingRect`` 返回紧贴墨水的最小包围盒：
     - x 可能为负（字形墨水越过 origin 左侧，例如斜体 ``f``）；
     - width 一般 ≤ ``horizontalAdvance(text)``，但极少数斜体场景可能略大；
+    - 对无字形码点（孤立的组合附加符、变体选择符等）返回 Qt 的空矩形
+      **哨兵值**（x=100000）——此处归零，避免毒化连词框的墨水并集；
     - 对空白字符（U+0020 / U+3000 / NBSP / Tab）通常返回零宽 → 此处保留为 (0, 0)，
       由调用方跳过 wipe 绘制。
+
+    注意 ``tightBoundingRect`` 在部分平台（Windows DirectWrite）**不计入
+    GPOS 定位的组合附加符**（``n̩`` ``d̥`` 的下标符号、``t͡ʃ`` 的连结线都不在
+    盒内）。需要含附加符的精确墨水时用 :func:`_vector_ink_bounds`。
 
     返回为 int；底层 Qt API 已是 int。
     """
     if not text:
         return (0, 0)
     rect = fm.tightBoundingRect(text)
+    # 空矩形哨兵（width<=0 或 x 到达哨兵值）：无墨水
+    if rect.width() <= 0 or rect.x() >= 100000 or rect.y() >= 100000:
+        return (0, 0)
     return (int(rect.x()), int(rect.width()))
+
+
+def _vector_ink_bounds(
+    font: QFont, text: str, cache: Optional[dict] = None
+) -> Optional[tuple[float, float, float, float]]:
+    """矢量轮廓墨水盒 ``(x, top, width, height)``，相对 drawText 的 ``(x, baseline)``。
+
+    用 ``QPainterPath.addText`` 的包围盒（与实际绘制同源、完整排版）：
+    GPOS 定位的组合附加符（上下标）、连结线的左右越界、声调字母的高低
+    全部计入——这是连词框 / 走字裁剪几何的可靠依据（tightBoundingRect
+    在 Windows 上会漏算附加符）。
+
+    ``top`` 相对基线（负=基线上方）。无墨水（空白 / 纯附加符孤段）返回
+    ``None``。``cache`` 传入实例级缓存字典（键含字体签名）。
+    """
+    if not text:
+        return None
+    key = None
+    if cache is not None:
+        fams = font.families()
+        key = (
+            fams[0] if fams else font.family(),
+            font.pointSizeF() if font.pointSizeF() >= 0 else font.pointSize(),
+            int(font.weight()),
+            font.italic(),
+            text,
+        )
+        hit = cache.get(key)
+        if hit is not None:
+            return hit if hit != "" else None
+    path = QPainterPath()
+    path.addText(0.0, 0.0, font, text)
+    br = path.boundingRect()
+    if br.isEmpty() or br.width() <= 0 or br.height() <= 0:
+        result = None
+    else:
+        result = (br.x(), br.y(), br.width(), br.height())
+    if cache is not None and key is not None:
+        if len(cache) > 20000:
+            cache.clear()
+        cache[key] = result if result is not None else ""
+    return result
 
 
 def _wipe_ink_bounds(fm: QFontMetrics, text: str) -> tuple[int, int]:
@@ -576,11 +636,22 @@ class KaraokePreview(QWidget):
         self._font_ruby = ui_font(10)
         self._font_checkpoint = self._build_checkpoint_font(8)
         self._font_line_number = ui_font(10)
+        # IPA 文本段字体（设置加载后由 set_font_sizes 重建）
+        from strange_uta_game.frontend.font_utils import phonetic_lyrics_font
+
+        self._font_current_ipa = phonetic_lyrics_font(self._font_current)
+        self._font_context_ipa = phonetic_lyrics_font(self._font_context)
+        self._font_ruby_ipa = phonetic_lyrics_font(self._font_ruby)
         self._fm_current = QFontMetrics(self._font_current)
         self._fm_context = QFontMetrics(self._font_context)
         self._fm_ruby = QFontMetrics(self._font_ruby)
+        self._fm_current_ipa = QFontMetrics(self._font_current_ipa)
+        self._fm_context_ipa = QFontMetrics(self._font_context_ipa)
+        self._fm_ruby_ipa = QFontMetrics(self._font_ruby_ipa)
         self._fm_checkpoint = QFontMetrics(self._font_checkpoint)
         self._fm_line_number = QFontMetrics(self._font_line_number)
+        # 矢量墨水盒缓存：(字体签名, 文本) → (x, top, width, height) | None
+        self._vector_ink_cache: dict = {}
         self._line_number_margin = 45  # 行号左侧区域宽度
         self._ruby_spacing = 4  # Ruby与主文字的垂直间距
         self._cp_spacing = 4  # 节奏点标记顶端与整行 ink 底部的垂直间距
@@ -1046,9 +1117,14 @@ class KaraokePreview(QWidget):
         y_center = center_y + (line_idx - self._scroll_center_line) * line_height
         ascent = max(self._fm_current.ascent(), self._fm_context.ascent())
         descent = max(self._fm_current.descent(), self._fm_context.descent())
-        pad = 4  # AA 边缘 + wipe 裁剪/连词框超出墨水的 1~2px + y_center 取整
+        ruby_height = max(
+            self._fm_ruby.height(), getattr(self, "_fm_ruby_ipa", self._fm_ruby).height()
+        )
+        # IPA 叠加附加符（ĩ̯ 等）与声调字母可能超出字体盒上下沿：加
+        # ruby 字体高度的一半作为墨水余量，避免重绘带切掉附加符顶端
+        pad = 4 + ruby_height // 2
         top = math.floor(
-            y_center - ascent - self._ruby_spacing - self._fm_ruby.height() - pad
+            y_center - ascent - self._ruby_spacing - ruby_height - pad
         )
         bottom = math.ceil(
             y_center + descent + self._cp_spacing + self._fm_checkpoint.height() + pad
@@ -1296,7 +1372,7 @@ class KaraokePreview(QWidget):
             cp_spacing: 节奏点标记顶端与主文字底部（descent）之间的垂直间距（默认4px）。
                 Marker 顶端按此 gap 对齐，避免大 cp_size 时被主文字遮盖上半。
         """
-        from strange_uta_game.frontend.font_utils import lyrics_font
+        from strange_uta_game.frontend.font_utils import lyrics_font, phonetic_lyrics_font
 
         context_size = max(1, min(99, base_size))
         current_size = max(1, min(99, current_line_size if current_line_size > 0 else base_size + 4))
@@ -1309,10 +1385,18 @@ class KaraokePreview(QWidget):
         self._font_current = lyrics_font(main_font, current_size, QFont.Weight.Bold)
         self._font_context = lyrics_font(main_font, context_size)
         self._font_ruby = lyrics_font(ruby_font, ruby_size)
+        # IPA 文本段字体：IPA 字体优先、原歌词字体链兜底（见 font_utils 模块
+        # 注释——跨字体回退无法 GPOS 锚定，附加符/重音符会错位）
+        self._font_current_ipa = phonetic_lyrics_font(self._font_current)
+        self._font_context_ipa = phonetic_lyrics_font(self._font_context)
+        self._font_ruby_ipa = phonetic_lyrics_font(self._font_ruby)
         self._font_checkpoint = self._build_checkpoint_font(cp_size)
         self._fm_current = QFontMetrics(self._font_current)
         self._fm_context = QFontMetrics(self._font_context)
         self._fm_ruby = QFontMetrics(self._font_ruby)
+        self._fm_current_ipa = QFontMetrics(self._font_current_ipa)
+        self._fm_context_ipa = QFontMetrics(self._font_context_ipa)
+        self._fm_ruby_ipa = QFontMetrics(self._font_ruby_ipa)
         self._fm_checkpoint = QFontMetrics(self._font_checkpoint)
         self._ruby_spacing = ruby_spacing
         self._cp_spacing = cp_spacing
@@ -1409,11 +1493,26 @@ class KaraokePreview(QWidget):
             return
 
         characters = self._project.sentences[line_idx].characters
+        fm_ruby = self._fm_ruby
+        fm_ruby_ipa = getattr(self, "_fm_ruby_ipa", fm_ruby)
+        from strange_uta_game.backend.infrastructure.parsers.ipa import has_ipa_text
+
+        def _fm_resolver(ci: int) -> QFontMetrics:
+            ruby = characters[ci].ruby if 0 <= ci < len(characters) else None
+            if (
+                fm_ruby_ipa is not fm_ruby
+                and ruby
+                and ruby.text
+                and (has_ipa_text(ruby.text) or any(len(c) > 1 for c in ruby.text))
+            ):
+                return fm_ruby_ipa
+            return fm_ruby
+
         for (cached_line_idx, _font_key), entry in self._sentence_cache.items():
             if cached_line_idx != line_idx:
                 continue
             char_spans, group_spans = _ruby_timed_span_maps(
-                self._fm_ruby,
+                _fm_resolver,
                 characters,
                 entry["linked_leader_groups"],
                 entry["linked_non_leader"],
@@ -2286,23 +2385,90 @@ class KaraokePreview(QWidget):
         characters = sentence.characters
         n_chars = len(chars)
 
+        # ── IPA 段判定与字体选择 ──
+        # IPA 词内的字符、以及本身是多码点簇（带组合附加符）的字符，用
+        # IPA 字体排版：CJK 主字体缺 IPA 字形时跨字体回退无法 GPOS 锚定
+        # （附加符漂移、ˈˌ 零宽与后字重叠）。
+        ipa_font = getattr(self, "_font_current_ipa", None)
+        if font_key == "ctx":
+            ipa_font = getattr(self, "_font_context_ipa", None)
+        fm_main_ipa = QFontMetrics(ipa_font) if ipa_font is not None else main_fm
+        base_font = self._font_context if font_key == "ctx" else self._font_current
+        has_ipa_styling = ipa_font is not None and ipa_font.families() != base_font.families()
+
+        char_uses_ipa: list[bool] = [False] * n_chars
+        if has_ipa_styling and n_chars:
+            from strange_uta_game.backend.infrastructure.parsers.ipa import (
+                find_ipa_words,
+            )
+
+            offsets = chars_to_offsets(chars)
+            for a, b, _w in find_ipa_words(sentence.text):
+                i0 = offset_to_index(offsets, a)
+                i1 = offset_to_index(offsets, b - 1)
+                for ci in range(i0, min(i1 + 1, n_chars)):
+                    char_uses_ipa[ci] = True
+            for ci, ch in enumerate(chars):
+                if len(ch) > 1:
+                    char_uses_ipa[ci] = True
+
+        def _fm_for_char(ci: int) -> QFontMetrics:
+            return fm_main_ipa if (has_ipa_styling and char_uses_ipa[ci]) else main_fm
+
+        def _font_for_char(ci: int):
+            return ipa_font if (has_ipa_styling and char_uses_ipa[ci]) else base_font
+
         # 字符像素宽度（初始为字符本身的 advance width，含侧 bearings/字间距）
-        # 同时计算字符的"墨水"边界（tightBoundingRect）—— wipe 严格按墨水边界裁剪，
-        # 不再扫过字形周围的透明像素或停顿点扩展区，确保 wipe 的视觉起止与时间戳一致。
+        # 同时计算字符的"墨水"边界—— wipe 严格按墨水边界裁剪，不再扫过
+        # 字形周围的透明像素；连词框取真实墨水并集（含上下附加符）。
         fm_ruby = self._fm_ruby
+        fm_ruby_ipa = getattr(self, "_fm_ruby_ipa", fm_ruby)
         avg_char_w = main_fm.averageCharWidth()
         char_widths = []
         # char_ink_offsets[ci] = ink_left（相对 drawText 的 x）
         # char_ink_widths[ci]  = ink 实际像素宽度
         # 空白字符 ink_width = 0，wipe 时跳过裁剪绘制（视觉上保留空白等待）。
-        char_ink_offsets: list[int] = []
-        char_ink_widths: list[int] = []
+        char_ink_offsets: list[float] = []
+        char_ink_widths: list[float] = []
+        char_advances: list[float] = []
+        # 墨水用矢量轮廓（tightBoundingRect 在 Windows 上不计 GPOS 附加符）；
+        # 无矢量墨水（空白/无字形）回退 tightBoundingRect（含哨兵防护）
         for ci, ch in enumerate(chars):
-            char_w = main_fm.horizontalAdvance(ch) if ch != ' ' else avg_char_w
+            fm_ci = _fm_for_char(ci)
+            font_ci = _font_for_char(ci)
+            char_w = fm_ci.horizontalAdvance(ch)
+            adv = char_w
+            if ch == ' ':
+                char_w = avg_char_w if fm_ci is main_fm else fm_ci.averageCharWidth()
+            ink = _vector_ink_bounds(font_ci, ch, self._vector_ink_cache)
+            if ink is not None:
+                ink_off, _ink_top, ink_w, _ink_h = ink
+                # 零 advance 但有墨水（Tahoma 式零宽重音符等）：以墨水宽度
+                # 作为格子宽，避免与后字重叠
+                if char_w <= 0 and ink_w > 0:
+                    char_w = ink_w + 2
+            else:
+                ink_off, ink_w = _wipe_ink_bounds(fm_ci, ch)
             char_widths.append(char_w)
-            ink_off, ink_w = _wipe_ink_bounds(main_fm, ch)
+            char_advances.append(adv)
             char_ink_offsets.append(ink_off)
             char_ink_widths.append(ink_w)
+
+        # 行墨水上下界（相对 y_center，供色带分界与 hitbox 高度用；缓存于
+        # entry，paintEvent 不再每帧重算）
+        line_ink_top = -main_fm.ascent()
+        line_ink_bottom = main_fm.descent()
+        for ci, ch in enumerate(chars):
+            if not ch or ch.isspace():
+                continue
+            ink = _vector_ink_bounds(
+                _font_for_char(ci), ch, self._vector_ink_cache
+            )
+            if ink is None:
+                continue
+            _x, top, _w, h = ink
+            line_ink_top = min(line_ink_top, top)
+            line_ink_bottom = max(line_ink_bottom, top + h)
 
         # ---------- 连词组（仅用于视觉层，与 wipe 计算无关） ----------
         char_groups: list = []
@@ -2327,6 +2493,16 @@ class KaraokePreview(QWidget):
                     linked_non_leader.add(_ci)
                     non_leader_to_leader[_ci] = group[0]
 
+        def _fm_for_ruby_text(text: str) -> QFontMetrics:
+            """ruby 文本含 IPA 特有字符或多码点簇时用 IPA 注音字体度量。"""
+            from strange_uta_game.backend.infrastructure.parsers.ipa import (
+                has_ipa_text,
+            )
+
+            if fm_ruby_ipa is not fm_ruby and (has_ipa_text(text) or any(len(c) > 1 for c in text)):
+                return fm_ruby_ipa
+            return fm_ruby
+
         # 连词组：将合并后的 ruby 宽度平均分配到组内每个字符
         for leader_ci, group in linked_leader_groups.items():
             merged_ruby_text = ""
@@ -2335,7 +2511,9 @@ class KaraokePreview(QWidget):
                 if _r:
                     merged_ruby_text += _r.text
             if merged_ruby_text:
-                merged_ruby_w = fm_ruby.horizontalAdvance(merged_ruby_text)
+                merged_ruby_w = _fm_for_ruby_text(merged_ruby_text).horizontalAdvance(
+                    merged_ruby_text
+                )
                 group_total_char_w = sum(char_widths[g] for g in group)
                 # 确保组的总宽度 >= 合并后ruby的宽度
                 target_total_w = max(group_total_char_w, merged_ruby_w)
@@ -2350,7 +2528,7 @@ class KaraokePreview(QWidget):
                 continue  # 连词组成员已处理
             ruby = characters[ci].ruby
             if ruby:
-                ruby_w = fm_ruby.horizontalAdvance(ruby.text)
+                ruby_w = _fm_for_ruby_text(ruby.text).horizontalAdvance(ruby.text)
                 char_widths[ci] = max(char_widths[ci], ruby_w)
 
         # 确保字符宽度 >= CP标记总宽度（避免CP标记重叠）
@@ -2528,8 +2706,9 @@ class KaraokePreview(QWidget):
                         _part_ws: Optional[list[int]] = None
                         _l_ruby = characters[leader].ruby
                         if _l_ruby and _l_ruby.parts and len(_l_ruby.parts) == len(_anchors) - 1:
+                            _fm_l = _fm_for_ruby_text(_l_ruby.text)
                             _part_ws = [
-                                fm_ruby.horizontalAdvance(p.text) for p in _l_ruby.parts
+                                _fm_l.horizontalAdvance(p.text) for p in _l_ruby.parts
                             ]
                         seg_anchor_groups[leader] = {
                             "anchors": _anchors,
@@ -2623,18 +2802,30 @@ class KaraokePreview(QWidget):
             char_part_anchors[ci] = gts + [int(seg_end_ts)]
 
         # ---------- Ruby 整串墨水边界缓存 ----------
-        # 单字符 ruby：以 ruby.text 整串的 tightBoundingRect 为准
-        # 连词组 ruby：以组内所有 ruby.text 拼接后整串的 tightBoundingRect 为准
-        # 返回 (ink_left, ink_width)，wipe 时把 clip 的左边界从 ruby_x 收缩到
-        # ruby_x + ink_left，宽度由 ink_width × ratio 决定。
-        char_ruby_ink: dict[int, tuple[int, int]] = {}
-        group_ruby_ink: dict[int, tuple[int, int]] = {}
+        # 单字符 ruby：以 ruby.text 整串的矢量墨水盒为准（含上下附加符——
+        # tightBoundingRect 在 Windows 上不计 GPOS 定位的附加符）
+        # 连词组 ruby：以组内所有 ruby.text 拼接后整串的墨水盒为准
+        # 返回 (ink_left, ink_width, ink_top, ink_bottom)——top/bottom 相对
+        # 基线（负=上方），wipe 裁剪与连词框几何用；无墨水时为 (0,0,0,0)。
+        char_ruby_ink: dict[int, tuple[float, float, float, float]] = {}
+        group_ruby_ink: dict[int, tuple[float, float, float, float]] = {}
+
+        def _ruby_ink_bounds(text: str) -> tuple[float, float, float, float]:
+            fm_txt = _fm_for_ruby_text(text)
+            font_txt = self._font_ruby_ipa if fm_txt is fm_ruby_ipa else self._font_ruby
+            ink = _vector_ink_bounds(font_txt, text, self._vector_ink_cache)
+            if ink is not None:
+                x, top, w, h = ink
+                return (x, w, top, top + h)
+            off, w = _ink_bounds(fm_txt, text)
+            return (off, w, 0.0, 0.0)
+
         for ci, ch_obj in enumerate(characters):
             if ci in linked_leader_groups or ci in linked_non_leader:
                 continue
             ruby = ch_obj.ruby
             if ruby and ruby.text:
-                char_ruby_ink[ci] = _ink_bounds(fm_ruby, ruby.text)
+                char_ruby_ink[ci] = _ruby_ink_bounds(ruby.text)
         for leader_ci, group in linked_leader_groups.items():
             merged_text = ""
             for _gci in group:
@@ -2642,9 +2833,14 @@ class KaraokePreview(QWidget):
                 if _r:
                     merged_text += _r.text
             if merged_text:
-                group_ruby_ink[leader_ci] = _ink_bounds(fm_ruby, merged_text)
+                group_ruby_ink[leader_ci] = _ruby_ink_bounds(merged_text)
+
+        def _fm_for_char_ruby(ci: int) -> QFontMetrics:
+            ruby = characters[ci].ruby
+            return _fm_for_ruby_text(ruby.text) if ruby and ruby.text else fm_ruby
+
         char_ruby_timed_spans, group_ruby_timed_spans = _ruby_timed_span_maps(
-            fm_ruby, characters, linked_leader_groups, linked_non_leader
+            _fm_for_char_ruby, characters, linked_leader_groups, linked_non_leader
         )
 
         # ---------- 连词组 ruby 的分段 wipe 时间轴 ----------
@@ -2675,14 +2871,15 @@ class KaraokePreview(QWidget):
                 ruby = characters[gci].ruby
                 if not ruby or not ruby.text:
                     continue
+                fm_ruby_member = _fm_for_ruby_text(ruby.text)
                 gts = list(characters[gci].global_timestamps)
                 parts = ruby.parts if ruby.parts else []
                 if gts and len(parts) == len(gts):
                     for _ts, _p in zip(gts, parts):
-                        flat.append((int(_ts), float(fm_ruby.horizontalAdvance(_p.text))))
+                        flat.append((int(_ts), float(fm_ruby_member.horizontalAdvance(_p.text))))
                 elif gts:
                     # parts 数与时间戳数不一致：整串 advance 等分到各时间戳
-                    _per = float(fm_ruby.horizontalAdvance(ruby.text)) / len(gts)
+                    _per = float(fm_ruby_member.horizontalAdvance(ruby.text)) / len(gts)
                     for _ts in gts:
                         flat.append((int(_ts), _per))
                 else:
@@ -2690,7 +2887,7 @@ class KaraokePreview(QWidget):
                     _wt = char_wipe_times.get(gci)
                     if _wt:
                         flat.append(
-                            (_wt[0], float(fm_ruby.horizontalAdvance(ruby.text)))
+                            (_wt[0], float(fm_ruby_member.horizontalAdvance(ruby.text)))
                         )
             if not flat or group_end is None:
                 continue
@@ -2718,6 +2915,10 @@ class KaraokePreview(QWidget):
             "char_widths": char_widths,
             "char_ink_offsets": char_ink_offsets,
             "char_ink_widths": char_ink_widths,
+            "char_advances": char_advances,
+            "char_uses_ipa": char_uses_ipa,
+            "line_ink_top": line_ink_top,
+            "line_ink_bottom": line_ink_bottom,
             "end_sentence_w": end_sentence_w,
             "total_text_width": sum(char_widths) + sum(end_sentence_w.values()),
             "char_wipe_times": char_wipe_times,
@@ -2955,11 +3156,18 @@ class KaraokePreview(QWidget):
         font_context = self._font_context
         font_ruby = self._font_ruby
         font_checkpoint = self._font_checkpoint
+        # IPA 段字体（与上方常规字体成对出现；详见 _get_sentence_render_data）
+        font_current_ipa = getattr(self, "_font_current_ipa", font_current)
+        font_context_ipa = getattr(self, "_font_context_ipa", font_context)
+        font_ruby_ipa = getattr(self, "_font_ruby_ipa", font_ruby)
 
         fm_current = self._fm_current
         fm_context = self._fm_context
         fm_ruby = self._fm_ruby
         fm_checkpoint = self._fm_checkpoint
+        fm_current_ipa = getattr(self, "_fm_current_ipa", fm_current)
+        fm_context_ipa = getattr(self, "_fm_context_ipa", fm_context)
+        fm_ruby_ipa = getattr(self, "_fm_ruby_ipa", fm_ruby)
 
         default_highlight = theme.default_highlight
 
@@ -3069,6 +3277,8 @@ class KaraokePreview(QWidget):
             char_widths = _rd["char_widths"]
             _char_ink_offsets = _rd["char_ink_offsets"]
             _char_ink_widths = _rd["char_ink_widths"]
+            char_advances = _rd.get("char_advances")
+            _char_uses_ipa = _rd.get("char_uses_ipa")
             _end_sentence_w = _rd["end_sentence_w"]
             total_text_width = _rd["total_text_width"]
             char_wipe_times = _rd["char_wipe_times"]
@@ -3099,27 +3309,11 @@ class KaraokePreview(QWidget):
 
             curr_x = start_x
 
-            # 预计算本行所有非空白字符的实际墨水上下边界（屏幕坐标）。
+            # 本行所有非空白字符的实际墨水上下边界（缓存于 entry：矢量轮廓，
+            # 含 IPA 上下附加符；孤立附加符残段已由渲染数据侧的哨兵防护剔除）。
             # 用于分色渲染时统一色带分界线，使同行各字符的分色视觉位置一致。
-            _line_ink_top = y_center - main_fm.ascent()   # 默认 fallback
-            _line_ink_bottom = y_center + main_fm.descent()
-            _ink_top_min = float("inf")
-            _ink_bottom_max = float("-inf")
-            for _ch in line.chars:
-                if not _ch or not _ch.strip():
-                    continue
-                _br = main_fm.tightBoundingRect(_ch)
-                # 无字形码点（如孤立变体选择符 U+FE0F——⛰️ 一类 emoji 按码点
-                # 拆分后的残段）返回 Qt 空矩形哨兵值（top=100000/bottom=99999），
-                # 混入会把本行 ink_bottom 推到 +100000，轴点 marker 与打轴
-                # 指示线全部画出屏。高度非正即视为退化，跳过。
-                if _br.height() <= 0:
-                    continue
-                _ink_top_min = min(_ink_top_min, y_center + _br.top())
-                _ink_bottom_max = max(_ink_bottom_max, y_center + _br.bottom())
-            if _ink_top_min < float("inf"):
-                _line_ink_top = int(_ink_top_min)
-                _line_ink_bottom = int(_ink_bottom_max) + 1
+            _line_ink_top = int(y_center + _rd["line_ink_top"])
+            _line_ink_bottom = int(y_center + _rd["line_ink_bottom"]) + 1
 
             # 高亮/选中/hitbox 矩形几何：覆盖从主文字 ink 顶到最大 marker ink 底，
             # per-line 统一。
@@ -3207,20 +3401,29 @@ class KaraokePreview(QWidget):
                             _grp_rubies.append(_r)
                     if _grp_rubies:
                         _merged = "".join(r.text for r in _grp_rubies)
+                        # ruby 含 IPA 时整串用 IPA 注音字体（同字体才能锚定附加符）
+                        from strange_uta_game.backend.infrastructure.parsers.ipa import (
+                            has_ipa_text,
+                        )
+
+                        _ruby_is_ipa = has_ipa_text(_merged) or any(len(c) > 1 for c in _merged)
+                        _ruby_font = font_ruby_ipa if _ruby_is_ipa else font_ruby
+                        _fm_ruby_here = fm_ruby_ipa if _ruby_is_ipa else fm_ruby
                         _grp_w = sum(char_widths[g] for g in _grp)
-                        ruby_text_w = fm_ruby.horizontalAdvance(_merged)
+                        ruby_text_w = _fm_ruby_here.horizontalAdvance(_merged)
                         ruby_x = curr_x + (_grp_w - ruby_text_w) // 2
                         ruby_y = int(y_center - main_fm.ascent() - self._ruby_spacing)
-                        # Ruby 整串墨水边界（合并后整体 tightBoundingRect）：
+                        # Ruby 整串墨水边界（合并后整体矢量墨水盒，含上下附加符）：
                         # wipe 按墨水起止点裁剪，不再扫过 ruby 首尾的透明侧 bearings。
-                        _r_ink_off, _r_ink_w = _group_ruby_ink.get(char_pos, (0, ruby_text_w))
+                        _r_ink_off, _r_ink_w, _r_ink_top, _r_ink_bottom = _group_ruby_ink.get(
+                            char_pos, (0, ruby_text_w, -_fm_ruby_here.ascent(), _fm_ruby_here.descent())
+                        )
                         _r_ink_x = ruby_x + _r_ink_off
-                        painter.setFont(font_ruby)
+                        painter.setFont(_ruby_font)
                         _rh_colors = _char_singer_colors.get(_grp[0], [highlight_color])
                         # Ruby 分色边界：基于该 ruby 串的实际墨水范围
-                        _rh_br = fm_ruby.tightBoundingRect(_merged)
-                        _rh_ink_top = ruby_y + _rh_br.top()
-                        _rh_ink_bottom = ruby_y + _rh_br.bottom() + 1
+                        _rh_ink_top = int(ruby_y + _r_ink_top)
+                        _rh_ink_bottom = int(ruby_y + _r_ink_bottom) + 1
                         # 注音状态接入打轴指引总开关；关闭时恢复旧版纯基色。
                         # 后面的 singer-color wipe 保持既有实现，原样叠在此底层之上。
                         _draw_ruby_base(
@@ -3229,7 +3432,7 @@ class KaraokePreview(QWidget):
                             ruby_y,
                             _merged,
                             _group_ruby_timed_spans.get(char_pos, []),
-                            fm_ruby,
+                            _fm_ruby_here,
                             _ruby_foreground,
                             _ruby_max_alpha,
                             guide_enabled=self._preview_guide_enabled,
@@ -3252,9 +3455,9 @@ class KaraokePreview(QWidget):
                                 painter.setClipRect(
                                     QRect(
                                         int(_r_ink_x),
-                                        ruby_y - fm_ruby.ascent() - 2,
+                                                int(ruby_y + _r_ink_top) - 2,
                                         _rww,
-                                        fm_ruby.height() + 4,
+                                                int(_r_ink_bottom - _r_ink_top) + 4,
                                     )
                                 )
                                 _draw_split_text(
@@ -3286,9 +3489,9 @@ class KaraokePreview(QWidget):
                                         painter.setClipRect(
                                             QRect(
                                                 int(_r_ink_x),
-                                                ruby_y - fm_ruby.ascent() - 2,
+                                        int(ruby_y + _r_ink_top) - 2,
                                                 _rww,
-                                                fm_ruby.height() + 4,
+                                        int(_r_ink_bottom - _r_ink_top) + 4,
                                             )
                                         )
                                         _draw_split_text(
@@ -3296,23 +3499,24 @@ class KaraokePreview(QWidget):
                                             _rh_colors, _rh_ink_top, _rh_ink_bottom,
                                         )
                                         painter.restore()
-                        # 连词框：Ruby 拼接串实际总宽 vs 字符组墨水宽度取更宽者。
-                        # 若 ruby 实际总宽 < 字符组墨水宽度 → 用字符墨水边界（方法2），
-                        # 否则 ruby 串已经超出字符墨水范围 → 用 ruby 墨水边界（方法1）。
+                        # 连词框：ruby 墨水宽度 vs 字符组墨水宽度取更宽者（同为
+                        # 墨水口径）。字符墨水按绘制位置（格子内居中）计算。
                         # --- 方法1：Ruby 拼接串墨水边界 ---
                         _ruby_box_left = _r_ink_x
                         _ruby_box_right = _r_ink_x + _r_ink_w
-                        _ruby_box_w = ruby_text_w
-                        # --- 方法2：字符组墨水边界并集 ---
+                        _ruby_box_w = _r_ink_w
+                        # --- 方法2：字符组墨水边界并集（计入格子内居中偏移）---
                         _char_ink_left = float('inf')
                         _char_ink_right = float('-inf')
                         _cum = 0
                         for _gci in _grp:
-                            _char_x = curr_x + _cum
-                            _char_ink_x = _char_x + _char_ink_offsets[_gci]
+                            _cw = char_widths[_gci]
+                            _adv = char_advances[_gci]
+                            _glyph_x = curr_x + _cum + (_cw - _adv) / 2
+                            _char_ink_x = _glyph_x + _char_ink_offsets[_gci]
                             _char_ink_left = min(_char_ink_left, _char_ink_x)
                             _char_ink_right = max(_char_ink_right, _char_ink_x + _char_ink_widths[_gci])
-                            _cum += char_widths[_gci]
+                            _cum += _cw
                         _char_box_w = _char_ink_right - _char_ink_left
                         if _ruby_box_w < _char_box_w:
                             _box_left = int(_char_ink_left)
@@ -3321,9 +3525,11 @@ class KaraokePreview(QWidget):
                             _box_left = int(_ruby_box_left)
                             _box_right = int(_ruby_box_right)
                         _frame_x = _box_left - 2
-                        _frame_y = ruby_y - fm_ruby.ascent() - 1
+                        # 框高按 ruby 真实墨水（含上下附加符），不再用字体级
+                        # ascent/height——叠加附加符（ĩ̯ 一类）会超出字体盒
+                        _frame_y = int(ruby_y + _r_ink_top) - 2
                         _frame_w = (_box_right - _box_left) + 4
-                        _frame_h = fm_ruby.height() + 2
+                        _frame_h = int(_r_ink_bottom - _r_ink_top) + 4
                         _frame_color = QColor(base_color)
                         _frame_color.setAlpha(120)
                         painter.save()
@@ -3342,22 +3548,33 @@ class KaraokePreview(QWidget):
                 else:
                     ruby = line.characters[char_pos].ruby
                     if ruby:
-                        # 单字符 ruby（per-char 模型）- 渲染剥离 '#' 分组标记
+                        # 单字符 ruby（per-char 模型）
                         _ruby_disp = ruby.text
-                        ruby_text_w = fm_ruby.horizontalAdvance(_ruby_disp)
+                        from strange_uta_game.backend.infrastructure.parsers.ipa import (
+                            has_ipa_text,
+                        )
+
+                        _ruby_is_ipa = has_ipa_text(_ruby_disp) or any(
+                            len(c) > 1 for c in _ruby_disp
+                        )
+                        _ruby_font = font_ruby_ipa if _ruby_is_ipa else font_ruby
+                        _fm_ruby_here = fm_ruby_ipa if _ruby_is_ipa else fm_ruby
+                        ruby_text_w = _fm_ruby_here.horizontalAdvance(_ruby_disp)
                         ruby_x = curr_x + (char_w - ruby_text_w) // 2
                         ruby_y = int(y_center - main_fm.ascent() - self._ruby_spacing)
-                        # Ruby 文本整串墨水边界（含所有假名）
-                        _r_ink_off, _r_ink_w = _char_ruby_ink.get(char_pos, (0, ruby_text_w))
+                        # Ruby 文本整串墨水边界（矢量墨水，含上下附加符）
+                        _r_ink_off, _r_ink_w, _r_ink_top, _r_ink_bottom = _char_ruby_ink.get(
+                            char_pos,
+                            (0, ruby_text_w, -_fm_ruby_here.ascent(), _fm_ruby_here.descent()),
+                        )
                         _r_ink_x = ruby_x + _r_ink_off
-                        painter.setFont(font_ruby)
+                        painter.setFont(_ruby_font)
                         ruby_highlight_colors = _char_singer_colors.get(
                             char_pos, [highlight_color]
                         )
                         # Ruby 分色边界：基于该 ruby 串的实际墨水范围
-                        _ruby_br = fm_ruby.tightBoundingRect(_ruby_disp)
-                        _ruby_ink_top = ruby_y + _ruby_br.top()
-                        _ruby_ink_bottom = ruby_y + _ruby_br.bottom() + 1
+                        _ruby_ink_top = int(ruby_y + _r_ink_top)
+                        _ruby_ink_bottom = int(ruby_y + _r_ink_bottom) + 1
                         # 注音状态接入打轴指引总开关；关闭时恢复旧版纯基色。
                         # 后面的 singer-color wipe 保持既有实现，原样叠在此底层之上。
                         _draw_ruby_base(
@@ -3366,7 +3583,7 @@ class KaraokePreview(QWidget):
                             ruby_y,
                             _ruby_disp,
                             _char_ruby_timed_spans.get(char_pos, []),
-                            fm_ruby,
+                            _fm_ruby_here,
                             _ruby_foreground,
                             _ruby_max_alpha,
                             guide_enabled=self._preview_guide_enabled,
@@ -3382,7 +3599,7 @@ class KaraokePreview(QWidget):
                                 _parts = ruby.parts if ruby.parts else []
                                 if len(_parts) == _n and _n > 0:
                                     _part_ws = [
-                                        fm_ruby.horizontalAdvance(p.text)
+                                        _fm_ruby_here.horizontalAdvance(p.text)
                                         for p in _parts
                                     ]
                                     _total_pw = sum(_part_ws)
@@ -3405,9 +3622,9 @@ class KaraokePreview(QWidget):
                                     painter.setClipRect(
                                         QRect(
                                             int(_r_ink_x),
-                                            ruby_y - fm_ruby.ascent() - 2,
+                                                int(ruby_y + _r_ink_top) - 2,
                                             r_wipe_w,
-                                            fm_ruby.height() + 4,
+                                                int(_r_ink_bottom - _r_ink_top) + 4,
                                         )
                                     )
                                     _draw_split_text(
@@ -3439,9 +3656,9 @@ class KaraokePreview(QWidget):
                                         painter.setClipRect(
                                             QRect(
                                                 int(_r_ink_x),
-                                                ruby_y - fm_ruby.ascent() - 2,
+                                            int(ruby_y + _r_ink_top) - 2,
                                                 r_wipe_w,
-                                                fm_ruby.height() + 4,
+                                            int(_r_ink_bottom - _r_ink_top) + 4,
                                             )
                                         )
                                         _draw_split_text(
@@ -3451,12 +3668,23 @@ class KaraokePreview(QWidget):
                                         painter.restore()
 
                 # 主文字 — 基于 checkpoint 的逐字 wipe
-                painter.setFont(main_font)
+                # IPA 段字符换用 IPA 字体（CJK 主字体对 IPA 的跨字体回退无法
+                # 锚定附加符）；度量同步切换
+                _char_is_ipa = bool(_char_uses_ipa and _char_uses_ipa[char_pos])
+                if _char_is_ipa:
+                    _main_font_here = (
+                        font_current_ipa if is_current else font_context_ipa
+                    )
+                    _main_fm_here = fm_current_ipa if is_current else fm_context_ipa
+                else:
+                    _main_font_here = main_font
+                    _main_fm_here = main_fm
+                painter.setFont(_main_font_here)
                 # 使用 per-char singer 颜色（List[QColor]，支持分色）
                 char_colors = _char_singer_colors.get(char_pos, [highlight_color])
 
                 # 字符在 char_w 宽度内居中（与 ruby 对齐）
-                char_text_w = main_fm.horizontalAdvance(ch)
+                char_text_w = _main_fm_here.horizontalAdvance(ch)
                 char_draw_x = curr_x + (char_w - char_text_w) // 2
 
                 # 走字预览指引：命中时把"未走字部分的底色"换成走字后分色 × 不透明度
@@ -3534,11 +3762,12 @@ class KaraokePreview(QWidget):
                             ink_off = _char_ink_offsets[char_pos]
                             painter.save()
                             wipe_w = int(ink_w * wipe_ratio)
+                            # 垂直裁剪用行墨水包络（叠加附加符可能超出字体盒）
                             clip_rect = QRect(
                                 int(char_draw_x + ink_off),
-                                int(y_center - main_fm.ascent() - 5),
+                                _line_ink_top - 5,
                                 wipe_w,
-                                main_fm.height() + 10,
+                                (_line_ink_bottom - _line_ink_top) + 10,
                             )
                             painter.setClipRect(clip_rect)
                             # _draw_split_text 内部用 IntersectClip，与 wipe clip 正确叠加

@@ -794,8 +794,11 @@ class LineDetailDialog(QDialog):
             item = self.table.item(row_idx, col)
             return item.text() if item else ""
 
-        # --- 字符 (col 0) ---
-        glyphs = list(cell(0))
+        # --- 字符 (col 0) —— 按字素簇拆分（ɛ̃/t͡ʃ 是一个字符）；旧码点行
+        # （簇数与 cp 项数不齐但码点数齐）回退码点拆分保兼容 ---
+        from strange_uta_game.backend.domain.graphemes import split_graphemes
+
+        glyphs = split_graphemes(cell(0))
         if not glyphs:
             errors.append(f"行 {row_idx + 1}: 字符不能为空")
             return None, errors
@@ -805,11 +808,16 @@ class LineDetailDialog(QDialog):
         cp_text = cell(2).strip()
         cp_tokens = cp_text.split(",") if cp_text != "" else []
         if len(cp_tokens) != n:
-            errors.append(
-                f"行 {row_idx + 1}: 节奏点列需 {n} 项（与字符数一致），当前 "
-                f"{len(cp_tokens)} 项"
-            )
-            return None, errors
+            if len(cp_tokens) == len(cell(0)):
+                # 旧码点行：按码点拆分（每码点一项 cp）
+                glyphs = list(cell(0))
+                n = len(glyphs)
+            else:
+                errors.append(
+                    f"行 {row_idx + 1}: 节奏点列需 {n} 项（与字符数一致），当前 "
+                    f"{len(cp_tokens)} 项"
+                )
+                return None, errors
         check_counts: List[int] = []
         for token in cp_tokens:
             token = token.strip()

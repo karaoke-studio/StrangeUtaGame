@@ -1515,7 +1515,12 @@ def build_annotated_reading(
             return "|".join(p.text for p in ruby.parts if p.text)
         return ""
 
-    n = len(word)
+    # 按字素簇对齐：word 的 N 个「字符」是字素簇（ɛ̃/t͡ʃ 各为一个），
+    # per_char_ruby / per_char_linked 也按簇给出
+    from strange_uta_game.backend.domain.graphemes import split_graphemes
+
+    units = split_graphemes(word)
+    n = len(units)
     linked: "list[bool]" = list(per_char_linked) if per_char_linked else [False] * n
 
     out: list = []
@@ -1526,7 +1531,7 @@ def build_annotated_reading(
         while j < n - 1 and j < len(linked) and linked[j]:
             j += 1
         # 链覆盖 [i..j]
-        chain_chars = word[i : j + 1]
+        chain_chars = "".join(units[i : j + 1])
         chain_rubies = [
             per_char_ruby[k] if k < len(per_char_ruby) else None
             for k in range(i, j + 1)

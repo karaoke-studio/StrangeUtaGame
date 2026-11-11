@@ -158,7 +158,14 @@ def _clean_user_dict_split(
         if "," not in dict_reading:
             continue
         parts = [p.strip() for p in dict_reading.split(",")]
-        if len(parts) == len(word) and all(parts) and "".join(parts) == reading:
+        # 词典分段按字素簇计数对齐（word 的簇可能多码点）
+        from strange_uta_game.backend.domain.graphemes import grapheme_count
+
+        if (
+            len(parts) == grapheme_count(word)
+            and all(parts)
+            and "".join(parts) == reading
+        ):
             return parts
     return None
 
@@ -807,6 +814,8 @@ def parse_lyric_content(
         raw_lines.pop()
 
     sentences = []
+    from strange_uta_game.backend.domain.graphemes import split_graphemes
+
     for raw_line in raw_lines:
         line_text = raw_line.strip()
         if not line_text:
@@ -814,7 +823,8 @@ def parse_lyric_content(
             continue
         sentence = Sentence(
             singer_id=default_singer_id,
-            characters=[Character(char=c) for c in line_text],
+            # 字素簇：ɛ̃/t͡ʃ 等多码点音段是一个字符
+            characters=[Character(char=c) for c in split_graphemes(line_text)],
         )
         sentences.append(sentence)
 

@@ -33,6 +33,11 @@ from __future__ import annotations
 import re
 from typing import Dict, List, Optional, Sequence, Tuple, TYPE_CHECKING
 
+from strange_uta_game.backend.domain.graphemes import (
+    next_grapheme_end,
+    split_graphemes,
+)
+
 if TYPE_CHECKING:
     # 仅用于类型注解，避免运行时 import 产生循环。
     from strange_uta_game.backend.domain.models import Character
@@ -77,7 +82,7 @@ def parse_annotated_line(
                 text_part, readings_part = content.split("||", 1)
                 per_char_readings = readings_part.split(",")
                 start_idx = len(raw_chars)
-                for ch in text_part:
+                for ch in split_graphemes(text_part):
                     raw_chars.append(ch)
 
                 for j, reading_group in enumerate(per_char_readings):
@@ -89,19 +94,19 @@ def parse_annotated_line(
                 # 兼容简短：{text|mora|mora|mora}（单字多段）或 {text|reading}（单字单段）
                 text_part, _, readings_part = content.partition("|")
                 parts = [p for p in readings_part.split("|") if p != ""]
+                clusters = split_graphemes(text_part)
 
                 start_idx = len(raw_chars)
-                for ch in text_part:
-                    raw_chars.append(ch)
+                raw_chars.extend(clusters)
 
-                if len(text_part) == 1 and parts:
+                if len(clusters) == 1 and parts:
                     ruby_map[start_idx] = parts
-                elif len(text_part) > 1 and parts:
+                elif len(clusters) > 1 and parts:
                     # 歧义：多字只给一个 reading，兜底当作首字全吃
                     ruby_map[start_idx] = parts
             else:
                 # {text} 无 ruby → 纯文本
-                for ch in content:
+                for ch in split_graphemes(content):
                     raw_chars.append(ch)
 
             i = close + 1
@@ -423,9 +428,11 @@ def timed_line_columns(
                 i += 1
             i += 1
             group = characters[group_start:i]
-            # 块字形列：'{' 之后是原文部分，第 g 个字在 col+1+g
-            for g in range(len(group)):
-                columns[group_start + g] = col + 1 + g
+            # 块字形列：'{' 之后是原文部分；多码点簇成员按其码点宽度占列
+            _gcol = col + 1
+            for g, gc in enumerate(group):
+                columns[group_start + g] = _gcol
+                _gcol += len(gc.char)
             # 推进 col 到块串末尾
             segs: List[str] = []
             for c in group:
@@ -528,7 +535,15 @@ def _parse_block(content: str, singer_id: str, offset_ms: int = 0):
         text_part, readings = content.split("||", 1)
     else:
         text_part, readings = content, ""
-    text_chars = list(text_part)
+    # 原文按字素簇拆分（ɛ̃/t͡ʃ 是一个字符）；旧版按码点导出的行
+    # 段数对不上簇数时退回码点拆分，保证旧数据往返。
+    text_chars = split_graphemes(text_part)
+    if (
+        readings != ""
+        and len(text_chars) != readings.count(",") + 1
+        and len(text_part) == readings.count(",") + 1
+    ):
+        text_chars = list(text_part)
     segs = readings.split(",") if readings != "" else []
 
     chars: List[Character] = []
@@ -641,7 +656,7 @@ def parse_timed_line(
                     continue
                 # 未知演唱者名（不在项目设置中）→ 整个 【名】 当普通字符，
                 # 不静默丢弃（与不合规 [xxx] 的容错处理一致）。
-                for literal_ch in line_text[i : close + 1]:
+                for literal_ch in split_graphemes(line_text[i : close + 1]):
                     ch = Character(char=literal_ch, singer_id=current or "")
                     if pending_starts:
                         ch.check_count = len(pending_starts)
@@ -686,7 +701,7 @@ def parse_timed_line(
                     i = close + 1
                     continue
                 # 不合规 [xxx] → 逐字当普通字符（首字正常消耗 pending_starts）
-                for literal_ch in line_text[i : close + 1]:
+                for literal_ch in split_graphemes(line_text[i : close + 1]):
                     ch = Character(char=literal_ch, singer_id=current or "")
                     if pending_starts:
                         ch.check_count = len(pending_starts)
@@ -730,8 +745,11 @@ def parse_timed_line(
                     continue
             # 未配对或块内容不合规 → 当普通字符
 
-        # 普通字符
-        ch = Character(char=c, singer_id=current or "")
+        # 普通字符（整簇消费：附加符不与基字拆开；语法字符 [ { 【 永不成簇尾，
+        # 簇会在它们之前断开）
+        cluster_end = next_grapheme_end(line_text, i)
+        cluster = line_text[i:cluster_end]
+        ch = Character(char=cluster, singer_id=current or "")
         if pending_starts:
             ch.check_count = len(pending_starts)
             ch.timestamps = _build_timestamps(pending_starts)
@@ -749,7 +767,7 @@ def parse_timed_line(
             pending_force_singer = False
         pending_starts = []
         chars.append(ch)
-        i += 1
+        i = cluster_end
 
     if chars:
         chars[-1].is_line_end = True

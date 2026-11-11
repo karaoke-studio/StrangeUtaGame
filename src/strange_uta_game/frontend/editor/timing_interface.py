@@ -1302,6 +1302,10 @@ class EditorInterface(QWidget):
         cp_spacing = settings.get("ui.cp_spacing", 4)
         main_font = settings.get("ui.main_font", "Microsoft YaHei")
         ruby_font = settings.get("ui.ruby_font", "Microsoft YaHei")
+        # IPA 字体覆盖（"auto" = 按平台候选链自动选择；见 font_utils）
+        from strange_uta_game.frontend.font_utils import set_ipa_font_override
+
+        set_ipa_font_override(settings.get("ui.ipa_font", "auto"))
         self.preview.set_font_sizes(base_font_size, current_line_size, ruby_size, cp_size, line_height_factor, ruby_spacing, main_font=main_font, ruby_font=ruby_font, cp_spacing=cp_spacing)
         # 应用 checkpoint 标记字符
         checkpoint_markers = settings.get("ui.checkpoint_markers", {})
@@ -1952,9 +1956,11 @@ class EditorInterface(QWidget):
                 return
 
             if len(lines) == 1:
+                from strange_uta_game.backend.domain.graphemes import split_graphemes
+
                 new_chars = [
                     Character(char=c, singer_id=sentence.singer_id)
-                    for c in lines[0]
+                    for c in split_graphemes(lines[0])
                 ]
                 if not new_chars:
                     return
@@ -1962,7 +1968,7 @@ class EditorInterface(QWidget):
                 project = self._project
                 original_len = len(sentence.characters)
                 pos = max(0, min(insert_at, original_len))
-                affected = set(range(pos, pos + len(lines[0])))
+                affected = set(range(pos, pos + len(new_chars)))
 
                 def _mutate():
                     s = project.sentences[line_idx]
@@ -1978,19 +1984,22 @@ class EditorInterface(QWidget):
                 return
 
             # 多行：拆行粘贴
+            from strange_uta_game.backend.domain.graphemes import split_graphemes
+
             singer_id = sentence.singer_id
             project = self._project
             original_len = len(sentence.characters)
             pos = max(0, min(insert_at, original_len))
             has_after = pos < original_len
+            lines_clusters = [split_graphemes(seg) for seg in lines]
 
             def _mutate_multi():
                 s = project.sentences[line_idx]
                 after_chars = list(s.characters[pos:])
                 s.characters = s.characters[:pos]
 
-                # 第一段拼入当前行
-                for c in lines[0]:
+                # 第一段拼入当前行（字素簇：附加符不与基字拆开）
+                for c in lines_clusters[0]:
                     s.characters.append(Character(char=c, singer_id=singer_id))
                 for ch in s.characters:
                     ch.is_line_end = False
@@ -1999,9 +2008,9 @@ class EditorInterface(QWidget):
 
                 # 后续段逐行插入
                 insert_after = line_idx
-                for i, seg_text in enumerate(lines[1:]):
+                for i, seg_chars_src in enumerate(lines_clusters[1:]):
                     seg_chars = [
-                        Character(char=c, singer_id=singer_id) for c in seg_text
+                        Character(char=c, singer_id=singer_id) for c in seg_chars_src
                     ]
 
                     # 最后一段拼接光标后原有字符
@@ -2027,13 +2036,15 @@ class EditorInterface(QWidget):
             self._execute_structural_edit("粘贴字符", _mutate_multi)
             # 收集所有受影响行/范围，合并为一次异步分析，避免多个 InfoBar
             _paste_specs: list = []
-            if lines[0]:
-                _paste_specs.append((line_idx, set(range(pos, pos + len(lines[0])))))
+            if lines_clusters[0]:
+                _paste_specs.append(
+                    (line_idx, set(range(pos, pos + len(lines_clusters[0]))))
+                )
             for li in range(line_idx + 1, line_idx + len(lines) - 1):
                 _paste_specs.append((li, None))
-            if len(lines) > 1 and lines[-1]:
+            if len(lines) > 1 and lines_clusters[-1]:
                 _affected_last = (
-                    set(range(0, len(lines[-1]))) if has_after else None
+                    set(range(0, len(lines_clusters[-1]))) if has_after else None
                 )
                 _paste_specs.append((line_idx + len(lines) - 1, _affected_last))
             if _paste_specs:

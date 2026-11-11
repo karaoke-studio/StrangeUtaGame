@@ -1141,10 +1141,14 @@ def nicokara_result_to_sentences(
             sentences.append(Sentence(singer_id=line_singer_id, characters=[]))
             continue
 
-        # 创建句子（from_text 设置默认 checkpoint 配置）
+        # 创建句子（from_text 设置默认 checkpoint 配置）。
+        # 按码点拆分：上方 ParsedLine 的 timetags/ruby_map/char_singer_map
+        # 等下标均按码点计；全部应用完后统一 normalize_graphemes() 合并回
+        # 字素簇（ɛ̃ 等多码点音段是一个字符）。
         sentence = Sentence.from_text(
             text=parsed.text,
             singer_id=line_singer_id,
+            by_codepoint=True,
         )
 
         # is_sentence_end（演唱停顿/释放）必须严格反映文件事实：
@@ -1243,6 +1247,9 @@ def nicokara_result_to_sentences(
             tail = sentence.characters[-1]
             tail_singer = tail.singer_id or sentence.singer_id or last_emitted_singer_id
             last_emitted_singer_id = tail_singer
+
+        # 码点视图收口：合并回字素簇
+        sentence.normalize_graphemes()
 
         sentences.append(sentence)
 
@@ -1811,6 +1818,8 @@ def parse_to_sentences(
         sentence = Sentence.from_text(
             text=parsed.text,
             singer_id=singer_id,
+            # ParsedLine 各下标图按码点计；应用完在行尾统一合并回字素簇
+            by_codepoint=True,
         )
 
         # 按字符分组时间戳（同一字符多个 ts 时第二个作为 sentence_end_ts）
@@ -2027,6 +2036,9 @@ def parse_to_sentences(
 
         if parsed.song_part:
             sentence.song_part = parsed.song_part
+
+        # 码点视图收口：合并回字素簇
+        sentence.normalize_graphemes()
 
         sentences.append(sentence)
 

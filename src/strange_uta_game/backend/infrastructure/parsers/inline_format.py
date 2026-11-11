@@ -122,22 +122,88 @@ _SMALL_KANA = set("ぁぃぅぇぉっゃゅょゎァィゥェォッャュョヮ�
 
 
 def split_into_moras(text: str) -> List[str]:
-    """将日语文本按拍（モーラ）拆分。
+    """将注音文本按拍拆分（假名按モーラ，IPA 按音节）。
 
-    小假名 (ゃ, ゅ, ょ, っ 等) 和长音符 (ー) 附属前一拍。
-    逗号是读音分隔符，会被跳过。
+    - 小假名（ゃ ゅ ょ っ …）与长音符 ``ー`` 附属前一拍（历史行为）；
+    - 组合附加符随基字成簇（``ɛ̃`` 一拍），IPA 修饰符（``ʰ`` ``ː`` ``˥``
+      ``ⁿ`` …）附属前一单位，重音符（``ˈ`` ``ˌ``）附属后一单位开头；
+    - 含 IPA 特有字符的文本改按**音节**拆分（``ipa_syllables``）——
+      IPA 的拍是音节而不是音段；
+    - 逗号是读音分隔符，会被跳过。
     """
     if not text:
         return []
+    from strange_uta_game.backend.infrastructure.parsers.ipa import (
+        has_ipa_text,
+        ipa_syllables,
+        is_stress_mark,
+    )
+    from strange_uta_game.backend.infrastructure.parsers.text_splitter import (
+        CharType,
+        get_char_type,
+    )
+
+    if has_ipa_text(text):
+        syllables = ipa_syllables(text.replace(",", ""))
+        if syllables:
+            return syllables
+        return [text.replace(",", "")] if text.replace(",", "") else []
+
+    from strange_uta_game.backend.domain.graphemes import split_graphemes
+
     moras: List[str] = []
-    for ch in text:
-        if ch == ',':
+    pending_stress = ""
+    for cluster in split_graphemes(text):
+        if cluster == ",":
             continue  # 跳过逗号分隔符
-        if ch in _SMALL_KANA and moras:
-            moras[-1] += ch
+        if is_stress_mark(cluster):
+            pending_stress += cluster
+            continue
+        unit = pending_stress + cluster
+        pending_stress = ""
+        attaches = (
+            cluster in _SMALL_KANA
+            or get_char_type(cluster) == CharType.MODIFIER
+        )
+        if moras and attaches:
+            moras[-1] += unit
         else:
-            moras.append(ch)
+            moras.append(unit)
+    if pending_stress:
+        if moras:
+            moras[-1] += pending_stress
+        else:
+            moras.append(pending_stress)
     return moras
+
+
+def split_ruby_units(text: str) -> List[str]:
+    """把 ruby 文本切成不可再分的**读音单位**列表（跳过逗号分隔符）。
+
+    单位 = 字素簇（``ɛ̃`` ``t͡ʃ`` 各为一个单位）+ 重音符前置归并。
+    供「按字符均分」模式使用——既不会把基字与附加符拆开，也不做假名
+    mora / IPA 音节归并（那是 "mora" 模式的 :func:`split_into_moras` 的职责）。
+    """
+    from strange_uta_game.backend.domain.graphemes import split_graphemes
+    from strange_uta_game.backend.infrastructure.parsers.ipa import is_stress_mark
+
+    units: List[str] = []
+    pending = ""
+    for cluster in split_graphemes(text):
+        if cluster == ",":
+            continue
+        if is_stress_mark(cluster):
+            pending += cluster
+            continue
+        unit = pending + cluster
+        pending = ""
+        units.append(unit)
+    if pending:
+        if units:
+            units[-1] += pending
+        else:
+            units.append(pending)
+    return units
 
 
 def distribute_ruby_chars_evenly(chars: List[str], target_count: int) -> List[str]:
@@ -196,14 +262,14 @@ def split_ruby_for_checkpoints(ruby_text: str, total_cps: int) -> List[str]:
     if len(moras) > total_cps:
         return distribute_ruby_chars_evenly(moras, total_cps)
 
-    # 按字符拆分时跳过逗号
-    chars = [ch for ch in ruby_text if ch != ',']
-    if len(chars) <= total_cps:
-        # 字符数 ≤ cp 数: 每个 cp 分一个字符，多余 cp 分占位符（停顿符）
-        return chars + [get_ruby_pause_char()] * (total_cps - len(chars))
+    # 按读音单位拆分（字素簇，附加符不与基字拆开）时跳过逗号
+    units = split_ruby_units(ruby_text)
+    if len(units) <= total_cps:
+        # 单位数 ≤ cp 数: 每个 cp 分一个单位，多余 cp 分占位符（停顿符）
+        return units + [get_ruby_pause_char()] * (total_cps - len(units))
 
-    # 字符数 > cp 数: 均分到各段
-    return distribute_ruby_chars_evenly(chars, total_cps)
+    # 单位数 > cp 数: 均分到各段
+    return distribute_ruby_chars_evenly(units, total_cps)
 
 
 def split_ruby_segments(
@@ -247,7 +313,7 @@ def split_ruby_segments(
     if check_count <= 1:
         return [clean]
     if mode == "char":
-        return distribute_ruby_chars_evenly(list(clean), check_count)
+        return distribute_ruby_chars_evenly(split_ruby_units(clean), check_count)
     # mode == "mora"
     return split_ruby_for_checkpoints(clean, check_count)
 
@@ -834,7 +900,13 @@ def _parse_ruby_group(
     display_text = content[:pipe_pos]
     ruby_body = content[pipe_pos + 1 :]
 
-    display_chars = list(display_text)
+    # 原文按字素簇拆分（ɛ̃/t͡ʃ 是一个字符）。旧版按码点导出的文件
+    # （簇成员各自占一个 ＋ 段）段数对不上簇数时，退回码点拆分保往返。
+    from strange_uta_game.backend.domain.graphemes import split_graphemes
+
+    display_chars = split_graphemes(display_text)
+    if len(display_chars) != ruby_body.count(RUBY_SEP) + 1 and len(display_text) == ruby_body.count(RUBY_SEP) + 1:
+        display_chars = list(display_text)
 
     # 按 ＋ 分割各字符的 ruby 部分
     portions = ruby_body.split(RUBY_SEP)
@@ -1007,17 +1079,22 @@ def _parse_plain_segment(
                     if is_sentence_end and len(all_timestamps) > check_count:
                         sentence_end_ts = all_timestamps[check_count]
 
-                    # 为每个字符创建 Character
-                    for ch_idx, ch in enumerate(text):
+                    # 为每个字符创建 Character（字素簇，附加符不与基字拆开）
+                    from strange_uta_game.backend.domain.graphemes import (
+                        split_graphemes,
+                    )
+
+                    text_units = split_graphemes(text)
+                    for ch_idx, ch in enumerate(text_units):
                         if ch_idx == 0:
                             # 第一个字符：有 CP 和时间戳
                             character = Character(
                                 char=ch,
                                 check_count=check_count,
                                 timestamps=timestamps,
-                                sentence_end_ts=sentence_end_ts if len(text) == 1 else None,
-                                is_line_end=is_line_end if len(text) == 1 else False,
-                                is_sentence_end=is_sentence_end if len(text) == 1 else False,
+                                sentence_end_ts=sentence_end_ts if len(text_units) == 1 else None,
+                                is_line_end=is_line_end if len(text_units) == 1 else False,
+                                is_sentence_end=is_sentence_end if len(text_units) == 1 else False,
                                 is_rest=is_rest,
                                 singer_id=singer_id,
                             )
@@ -1026,8 +1103,8 @@ def _parse_plain_segment(
                             character = Character(
                                 char=ch,
                                 check_count=0,
-                                is_sentence_end=is_sentence_end if ch_idx == len(text) - 1 else False,
-                                sentence_end_ts=sentence_end_ts if ch_idx == len(text) - 1 else None,
+                                is_sentence_end=is_sentence_end if ch_idx == len(text_units) - 1 else False,
+                                sentence_end_ts=sentence_end_ts if ch_idx == len(text_units) - 1 else None,
                                 singer_id=singer_id,
                             )
                         characters.append(character)
@@ -1051,10 +1128,15 @@ def _parse_plain_segment(
                 n_str = m_no_ts.group(1)
                 pos = m_no_ts.end()
 
-                # 查看紧跟的文本字符
+                # 查看紧跟的文本字符（整簇消费，附加符不与基字拆开）
                 if pos < len(content) and content[pos] not in "[{":
-                    ch = content[pos]
-                    pos += 1
+                    from strange_uta_game.backend.domain.graphemes import (
+                        next_grapheme_end,
+                    )
+
+                    cluster_end = next_grapheme_end(content, pos)
+                    ch = content[pos:cluster_end]
+                    pos = cluster_end
 
                     check_count, is_line_end, is_sentence_end = decode_check_n(n_str)
 
@@ -1078,7 +1160,13 @@ def _parse_plain_segment(
                 # 无 CP 字符，与导出侧 cc=0 输出对称。旧实现只保留
                 # 半角空格/Tab，"♪"、全角空格等全部丢失，整行无 tag 的
                 # 句子 round-trip 会变空句。裸 ▨ 还原为休止符。
-                ch = content[pos]
+                # 按字素簇整簇消费（附加符不与基字拆开）。
+                from strange_uta_game.backend.domain.graphemes import (
+                    next_grapheme_end,
+                )
+
+                cluster_end = next_grapheme_end(content, pos)
+                ch = content[pos:cluster_end]
                 character = Character(
                     char=ch,
                     check_count=0,
@@ -1086,7 +1174,7 @@ def _parse_plain_segment(
                     singer_id=singer_id,
                 )
                 characters.append(character)
-                pos += 1
+                pos = cluster_end
 
     if pending_tags:
         _flush_pending(pending_tags, characters, singer_id)

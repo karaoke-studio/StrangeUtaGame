@@ -773,4 +773,9 @@ class SugProjectParser:
             song_part=str(data.get("song_part", "") or ""),
         )
 
+        # 字素簇自愈：旧版按码点切分的存档里，孤立附加符残段（['ɛ','̃']）
+        # 并回其基字——与上方 check_count/parts 失配自愈同一性质的结构修复。
+        # 全为单码点字符的常规日/中/英/韩歌词走快路径，零改动零开销。
+        sentence.normalize_graphemes()
+
         return sentence

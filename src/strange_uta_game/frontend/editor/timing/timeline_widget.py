@@ -16,6 +16,8 @@ from PyQt6.QtCore import QEvent, QPoint, QPointF, QSize, QRect, QRectF, Qt, QTim
 from PyQt6.QtGui import (
     QBrush,
     QColor,
+    QFont,
+    QFontMetrics,
     QImage,
     QMouseEvent,
     QWheelEvent,
@@ -2254,8 +2256,14 @@ class WaveformDisplay(QWidget):
 
     @staticmethod
     def _format_ruby_label(ruby_text: str) -> str:
-        if len(ruby_text) > 4:
-            return f"「{ruby_text[:4]}...」"
+        # 按字素簇截断：附加符不与基字截开（IPA ɛ̃/n̩ 等）
+        from strange_uta_game.backend.domain.graphemes import (
+            grapheme_count,
+            truncate_graphemes,
+        )
+
+        if grapheme_count(ruby_text) > 4:
+            return f"「{truncate_graphemes(ruby_text, 4)}...」"
         return f"「{ruby_text}」"
 
     def _draw_label_plate(self, painter: QPainter, x: int, label_y: int,
@@ -2263,7 +2271,12 @@ class WaveformDisplay(QWidget):
         """带半透明背景底片绘制标签文字：在文字后铺一层接近不透明的背景色底，
         把文字从蓝色波形上分离出来，可读性显著优于细光晕，且仍透出少量波形。
         声谱/双谱模式下底片更不透明——热力图颜色杂乱，需要更强的分离。
+
+        含 IPA 的标签临时换用 IPA 字体（CJK 主字体跨字体回退无法锚定
+        附加符）；底片宽度由调用方按度量传入，此处仅绘制。
         """
+        from strange_uta_game.backend.infrastructure.parsers.ipa import has_ipa_text
+
         top = label_y - fm.ascent()
         plate = QColor(theme.waveform_bg)
         plate.setAlpha(245 if self._display_mode in ("spectrum", "dual") else 225)
@@ -2271,7 +2284,15 @@ class WaveformDisplay(QWidget):
         painter.setBrush(QBrush(plate))
         painter.drawRoundedRect(QRect(x - 2, top - 1, text_w + 4, fm.height() + 1), 2, 2)
         painter.setPen(color)
-        painter.drawText(x, label_y, text)
+        if has_ipa_text(text) or any(len(c) > 1 for c in text):
+            from strange_uta_game.frontend.font_utils import phonetic_lyrics_font
+
+            painter.save()
+            painter.setFont(phonetic_lyrics_font(painter.font()))
+            painter.drawText(x, label_y, text)
+            painter.restore()
+        else:
+            painter.drawText(x, label_y, text)
 
     def _draw_time_tags(self, painter: QPainter, w: int, h: int,
                         visible_start_ms: float, visible_end_ms: float):
@@ -2364,7 +2385,20 @@ class WaveformDisplay(QWidget):
                     dx = (self._EDGE_LABEL_DX
                           if tag.handle in self._line_edge_handles else label_dx)
                     a = x + dx
-                    b = a + fm.horizontalAdvance(text)
+                    # 含 IPA 的标签用 IPA 字体度量（与 _draw_label_plate 同字体）
+                    from strange_uta_game.backend.infrastructure.parsers.ipa import (
+                        has_ipa_text,
+                    )
+
+                    if has_ipa_text(text) or any(len(c) > 1 for c in text):
+                        from strange_uta_game.frontend.font_utils import (
+                            phonetic_lyrics_font,
+                        )
+
+                        fm_label = QFontMetrics(phonetic_lyrics_font(font))
+                    else:
+                        fm_label = fm
+                    b = a + fm_label.horizontalAdvance(text)
                     labels.append((a, b, tag, color, text))
 
                 for a, b, tag, color, text in self._resolve_label_layout(labels):
