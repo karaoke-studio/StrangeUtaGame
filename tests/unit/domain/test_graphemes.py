@@ -67,6 +67,22 @@ class TestBasicSegmentation:
     def test_hangul_jamo_compose(self):
         assert split_graphemes("\u1100\u1161\u11a8") == ["\u1100\u1161\u11a8"]
 
+    def test_kirat_rai_vowel_signs_are_gcb_v(self):
+        # Unicode 16：U+16D63/U+16D67..16D6A 是 GCB=V，不是 Extend；
+        # 不能把前面的任意字符并进来。
+        v = "\U00016D63"
+        v2 = "\U00016D67"
+        assert split_graphemes("a" + v + v2) == ["a", v + v2]
+        assert split_graphemes(v2) == [v2]
+
+    def test_future_combining_block_tail_is_extend(self):
+        # 组合附加符区块末尾的未来码点按 Extend 容错（不把基字与附加符拆开）
+        assert split_graphemes("a\U00001ACF") == ["a\U00001ACF"]
+        assert split_graphemes("a\U00001DFF") == ["a\U00001DFF"]
+        # 仍是未分配空洞（UCD 17 的 1ADE/1ADF、1AEC–1AFF）不能并簇
+        assert split_graphemes("a\U00001ADE") == ["a", "\U00001ADE"]
+        assert split_graphemes("a\U00001AEC") == ["a", "\U00001AEC"]
+
     def test_devanagari_conjunct(self):
         assert split_graphemes("\u0915\u094d\u0937\u093f") == ["\u0915\u094d\u0937\u093f"]
 

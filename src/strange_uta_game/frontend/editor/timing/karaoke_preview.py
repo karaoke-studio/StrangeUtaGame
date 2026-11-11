@@ -470,10 +470,19 @@ def _vector_ink_bounds(
     if cache is not None:
         fams = font.families()
         key = (
-            fams[0] if fams else font.family(),
+            # 不只取首族名：IPA 字体与主字体可能同首族、不同回退链，缺字
+            # 时墨水盒会不同（缓存键必须包含完整字体链与具体字面）。
+            tuple(fams) if fams else (font.family(),),
+            font.styleName(),
             font.pointSizeF() if font.pointSizeF() >= 0 else font.pointSize(),
+            font.pixelSize(),
             int(font.weight()),
             font.italic(),
+            font.stretch(),
+            font.letterSpacing(),
+            font.capitalization(),
+            font.overline(),
+            font.hintingPreference(),
             text,
         )
         hit = cache.get(key)
@@ -3173,6 +3182,12 @@ class KaraokePreview(QWidget):
                 # 作为格子宽，避免与后字重叠
                 if char_w <= 0 and ink_w > 0:
                     char_w = ink_w + 2
+                elif use_vector and ink_w > 0:
+                    # 多码点簇（keycap/emoji/组合附加符）的轮廓可能比 advance
+                    # 宽；格子至少要覆盖墨水右缘，否则后字会压上来。
+                    _ink_cell = ink_w if ink_off < 0 else ink_off + ink_w
+                    if _ink_cell > char_w:
+                        char_w = _ink_cell
                 ink_top = _ink_top
                 ink_bottom = _ink_top + _ink_h  # QRectF 底边（不含）
             else:
@@ -4502,9 +4517,22 @@ class KaraokePreview(QWidget):
                 # 使用 per-char singer 颜色（List[QColor]，支持分色）
                 char_colors = _char_singer_colors.get(char_pos, [highlight_color])
 
-                # 字符在 char_w 宽度内居中（与 ruby 对齐）
+                # 字符在 char_w 宽度内居中（与 ruby 对齐）。多码点/矢量簇
+                # 的轮廓可能比 advance 宽（如 keycap 1️⃣）：此时按墨水左缘
+                # 对齐格子，避免居中后墨迹越过下一字符。
+                _is_vector_char = bool(
+                    _char_uses_ipa and _char_uses_ipa[char_pos]
+                )
                 char_text_w = _main_fm_here.horizontalAdvance(ch)
-                char_draw_x = curr_x + (char_w - char_text_w) // 2
+                if (
+                    _is_vector_char
+                    and _char_ink_widths[char_pos] > char_text_w
+                ):
+                    char_draw_x = curr_x - min(
+                        0.0, _char_ink_offsets[char_pos]
+                    )
+                else:
+                    char_draw_x = curr_x + (char_w - char_text_w) // 2
 
                 # 走字预览指引：命中时把"未走字部分的底色"换成走字后分色 × 不透明度
                 # （上一个=0.8 / 正在=0.5 / 下一个=0.2）。底色之上 wipe 照常叠加——

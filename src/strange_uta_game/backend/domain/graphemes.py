@@ -113,19 +113,21 @@ _EXTRA_EXTEND = frozenset(
         0x1B44, 0x1BAA, 0x1BF2, 0x1BF3, 0x200C, 0x302E, 0x302F, 0xA953,
         0xA9C0, 0x111C0, 0x11235, 0x1133E, 0x1134D, 0x11357, 0x113B8,
         0x113C2, 0x113C5, 0x113C7, 0x113C8, 0x113C9, 0x113CF, 0x114B0,
-        0x114BD, 0x115AF, 0x116B6, 0x11930, 0x1193D, 0x11F41, 0x16D67,
-        0x16D68, 0x16D69, 0x16D6A, 0x16FF0, 0x16FF1, 0x1D165, 0x1D166,
-        0x1D16D, 0x1D16E, 0x1D16F, 0x1D170, 0x1D171, 0x1D172,
+        0x114BD, 0x115AF, 0x116B6, 0x11930, 0x1193D, 0x11F41, 0x16FF0,
+        0x16FF1, 0x1D165, 0x1D166, 0x1D16D, 0x1D16E, 0x1D16F, 0x1D170,
+        0x1D171, 0x1D172,
         0x0897,  # ARABIC PIED NO QA：Cf 但 GCB=Extend
     }
 )
 
 # 整块视为组合附加符的区间：Python 内置 unicodedata 对块内**已分配**码点
-# 本就返回 Mn，这里把未分配尾段并入 Extend 仅为容错（未来 Unicode 版本
-# 新增的附加符直接可用）。范围不超出 Unicode 15.1 已分配区段太多。
+# 本就返回 Mn，这里把已分配尾段并入 Extend 仅为容错（未来 Unicode 版本
+# 新增的附加符直接可用）。范围止于 Unicode 17 已分配的 1ADD / 1AEB；
+# 1ADE–1ADF、1AEC–1AFF 仍未分配，不能整段并簇。
 _MARK_BLOCKS = _ranges(
-    0x1AB0, 0x1ACE,  # Combining Diacritical Marks Extended（15.1 已分配段）
-    0x1DC0, 0x1DFA,  # Combining Diacritical Marks Supplement（15.1 已分配段）
+    0x1AB0, 0x1ADD,  # Combining Diacritical Marks Extended
+    0x1AE0, 0x1AEB,  # Combining Diacritical Marks Extended（续）
+    0x1DC0, 0x1DFF,  # Combining Diacritical Marks Supplement
 )
 
 # 类别为 Mc 但 Grapheme_Cluster_Break=Other 的码点（不并簇）
@@ -238,7 +240,13 @@ def _classify_uncached(ch: str, cp: int) -> int:
     # Hangul：L / V / T / LV / LVT
     if 0x1100 <= cp <= 0x115F or 0xA960 <= cp <= 0xA97C:
         return _L
-    if 0x1160 <= cp <= 0x11A7 or 0xD7B0 <= cp <= 0xD7C6:
+    if (
+        0x1160 <= cp <= 0x11A7
+        or 0xD7B0 <= cp <= 0xD7C6
+        # Unicode 16 把 Kirat Rai 的元音符号归入 GCB=V（不是 Extend）
+        or cp == 0x16D63
+        or 0x16D67 <= cp <= 0x16D6A
+    ):
         return _V
     if 0x11A8 <= cp <= 0x11FF or 0xD7CB <= cp <= 0xD7FB:
         return _T

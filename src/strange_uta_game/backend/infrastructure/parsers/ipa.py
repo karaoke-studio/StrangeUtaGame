@@ -27,6 +27,8 @@ import unicodedata
 
 from strange_uta_game.backend.domain.graphemes import (
     grapheme_base,
+    is_double_diacritic,
+    is_grapheme_extender,
     next_grapheme_end,
     split_graphemes,
 )
@@ -70,8 +72,10 @@ def _expand(spec: str) -> frozenset[str]:
 # —— 双基字附加符（连结线）与 IPA 专属组合附加符。
 _IPA_TRIGGER = _expand(
     "0250-02AF "  # IPA Extensions
+    "02B0-02B8 "  # 上标修饰字母（ʰ ʱ ʲ ʴ ʵ ʶ ʷ ʸ）；不含 primes 02B9/02BA
+    "02C0 02C1 "  # 喉塞化修饰符 ˀ ˁ（不是 ʻokina/撇号类 02BB–02BF）
     "02C8 02CC 02D0 02D1 02DE 02E0 02E1 02E2 02E3 02E4 02E5 02E6 02E7 02E8 "
-    "02E9 02EC 02ED "
+    "02E9 02EA 02EB 02EC 02ED "
     "1D00-1DBF "  # Phonetic Extensions + Supplement
     "A700-A71F "
     "1DF00-1DFFF "
@@ -93,6 +97,7 @@ _MODIFIER_BACK = _expand(
     "02F6 02F7 02F8 02F9 02FA 02FB 02FC 02FD 02FE 02FF "
     "00B2 00B3 00B9 2070 2071 2074-208E 2090-209C "
     "1D2C-1D6A 1D78 1D9B-1DBF "
+    "10780-107BF "  # Latin Extended-F 的 IPA 修饰字母
     "A700-A716 A717 A718 A719 A71A A71B A71C A71D A71E A71F "
     "02C2-02C5 "
 )
@@ -181,16 +186,18 @@ def has_ipa_text(text: str) -> bool:
 
 
 def _has_word_base(word: str) -> bool:
-    """词内是否含至少一个**非修饰符**音段（字母簇或元音）。
+    """词内是否含至少一个**真实音段**（字母簇或元音）。
 
-    纯修饰符串（`˥˥` 声调条、孤立 `ˈ`、`⁵⁵` 声调数字）依附相邻音段，
-    自身不是词——不应作为「IPA 词」获得节奏点/词尾停顿点（审查反馈 #1）。
+    纯修饰符串（`˥˥` 声调条、孤立 `ˈ`、`⁵⁵` 声调数字）、
+    「修饰符+组合附加符」簇（`˥̃`）、孤立连结线（`͡`）以及音节点
+    ``.`` / 连接符 ``‿`` 都不是音段，不能单独构成 IPA 词。
     """
     for cluster in split_graphemes(word):
-        if len(cluster) > 1:
-            return True  # 基字+附加符簇
-        if not (is_stress_mark(cluster) or is_phonetic_modifier(cluster)):
-            return True  # 字母 / 元音 / 数字等非修饰符基字
+        base = grapheme_base(cluster)
+        if cluster in _SYLLABLE_BREAK or cluster == _LINKING:
+            continue
+        if _is_letter_cluster(cluster) or base in _VOWELS:
+            return True
     return False
 
 
@@ -219,11 +226,26 @@ def find_ipa_words(text: str) -> list[tuple[int, int, str]]:
     i = 0
     while i < n:
         cluster_len, cluster = _cluster_at(i)
+        if text[i] in (_SYLLABLE_BREAK, _LINKING):
+            # 词首音节点/连接符不粘附任何音段，跳过
+            i += cluster_len
+            continue
         if _is_word_member(text[i], cluster):
             j = i
             end = i
             while j < n:
                 clj, cluster_j = _cluster_at(j)
+                if text[j] in (_SYLLABLE_BREAK, _LINKING):
+                    # 音节点/连接符只粘合左侧已是 IPA 的片段；左侧是普通
+                    # ASCII 英文词（Nice.ˈhɛ...）时不把英文词拖进 IPA 词，
+                    # 留给英文管线。
+                    left = text[i:end]
+                    if (
+                        not is_ipa_word(left)
+                        and left.isascii()
+                        and len(left) >= 2
+                    ):
+                        break
                 if (
                     _is_word_member(text[j], cluster_j)
                     or text[j] == _SYLLABLE_BREAK
@@ -392,8 +414,10 @@ def ipa_syllable_onset_offsets(word: str) -> set[int]:
     """
     units = split_phonetic_units(word)
     if len(units) <= 1:
-        # 单位词：跳过前导重音符/修饰符
-        return {_skip_leading_modifiers(word, 0)}
+        # 单位词：跳过前导重音符/修饰符；全为修饰符（无核心）时返回 {0}
+        # 而不是 {None}——调用方按码点下标使用。
+        k = _skip_leading_modifiers(word, 0)
+        return {k} if k is not None else {0}
     onsets = _unit_onsets(units)
     offsets = []
     pos = 0
@@ -414,13 +438,17 @@ def ipa_syllable_onset_offsets(word: str) -> set[int]:
 def _skip_leading_modifiers(unit: str, offset: int) -> "int | None":
     """单位内第一个**实际音段**的偏移；单位全为重音符/修饰符时返回 None。
 
-    前导重音符（ˈ ˌ）与前导修饰符（声调条 ˥、ʰ 等）都不承载节奏点——
-    词首声调串（`˥˥ne`）的音节首应落在其后的元音/辅音音段上
-    （审查反馈 #1 收尾）。
+    前导重音符（ˈ ˌ）、修饰符（声调条 ˥、ʰ 等）以及组合附加符都不承载
+    节奏点——词首声调串（`˥˥ne`）的音节首应落在其后的元音/辅音音段上；
+    `ˈ̃a` 的附加符也不能被当成音节首（审查反馈：onset 必须落在字素簇
+    边界且不是附加符）。
     """
     k = 0
     while k < len(unit) and (
-        is_stress_mark(unit[k]) or is_phonetic_modifier(unit[k])
+        is_stress_mark(unit[k])
+        or is_phonetic_modifier(unit[k])
+        or is_grapheme_extender(unit[k])
+        or is_double_diacritic(unit[k])
     ):
         k += 1
     if k >= len(unit):

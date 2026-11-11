@@ -206,6 +206,29 @@ class TestPlainWipeInk:
 
 
 class TestMarkerAndHitbox:
+    def test_wide_multicodepoint_cluster_cell_covers_ink(self, qapp, monkeypatch):
+        """keycap 等簇的轮廓可比 advance 宽：格子必须覆盖墨水右缘。"""
+        real_vector = preview_module._vector_ink_bounds
+
+        def fake_vector(font, text, cache=None):
+            if text == "1️⃣":
+                return (2.0, -20.0, 30.0, 40.0)
+            return real_vector(font, text, cache)
+
+        monkeypatch.setattr(preview_module, "_vector_ink_bounds", fake_vector)
+        sent = Sentence(
+            singer_id="s",
+            characters=[_char("1️⃣", 1, [1000], end=True, end_ts=2000)],
+        )
+        preview = _preview_for(qapp, monkeypatch, sent)
+        entry = _entry(preview, sent)
+        assert entry["char_uses_ipa"] == [True]
+        assert entry["char_ink_offsets"][0] == 2.0
+        assert entry["char_ink_widths"][0] == 30.0
+        assert entry["char_widths"][0] == 32.0
+        assert entry["line_ink_top"] == -20.0
+        assert entry["line_ink_bottom"] == 20.0
+
     def test_marker_and_hitbox_follow_tight_ink(self, qapp, monkeypatch):
         sent = Sentence(
             singer_id="s",

@@ -121,10 +121,12 @@ def normalize_apostrophes(text: str) -> str:
 
 
 def get_syllable_start_offsets(word: str) -> Set[int]:
-    """返回 word 内各音节首字母的偏移集合（始终含 0）。
+    """返回 word 内各音节首字母的偏移集合。
 
-    含 IPA 特有字符的词按 **IPA 音节规则**切分（``ipa_syllable_onset_offsets``）；
-    其余用 CMU 发音词典与离线 G2P，按音素分音节后映射回原词字母位置。
+    非 IPA 英文词始终含 0（整词至少一个音节），用 CMU 发音词典与离线
+    G2P，按音素分音节后映射回原词字母位置。含 IPA 特有字符的词按
+    ``ipa_syllable_onset_offsets`` 切分，前导重音符/修饰符不承载节奏点，
+    因此返回值可能从 1 开始（如 ``ˈhɛləʊ`` → ``{1, 3}``）。
     无可靠发音/字母对应时保留整词；不把排版断字当作发音音节。
     底层任何异常（词典 IO、模型损坏等）同样退化为整词——本入口被歌词
     导入与自动打轴调用，不允许向用户数据路径抛异常。
@@ -186,11 +188,26 @@ def find_english_words(text: str) -> List[Tuple[int, int, str]]:
     if not ipa_words:
         return results
 
-    filtered = [
-        (s, e, w)
-        for s, e, w in results
-        if not any(s >= a and e <= b for a, b, _ in ipa_words)
-    ]
+    filtered = []
+    for s, e, _w in results:
+        overlaps = [(a, b) for a, b, _ in ipa_words if s < b and e > a]
+        if not overlaps:
+            filtered.append((s, e, normalized[s:e]))
+            continue
+        # 英文词的字母边界可能跨越 IPA 词（如 Nice.tʰa 的 "Nice.t"）：
+        # 只保留 IPA 范围外的片段，并去掉因截断留下的尾随点号。
+        cursor = s
+        for a, b in sorted(overlaps):
+            if cursor < a:
+                seg = normalized[cursor:min(a, e)].rstrip(".")
+                if seg:
+                    filtered.append((cursor, cursor + len(seg), seg))
+            cursor = max(cursor, b)
+        if cursor < e:
+            seg = normalized[cursor:e].strip(".")
+            if seg:
+                offset = normalized.find(seg, cursor, e)
+                filtered.append((offset, offset + len(seg), seg))
     filtered.extend(ipa_words)
     filtered.sort(key=lambda item: (item[0], item[1]))
     return filtered

@@ -45,6 +45,40 @@ class TestModifierOnlyRuns:
         assert ipa_mod.find_ipa_words("ˈ") == []
         assert ipa_mod.find_ipa_words("⁵⁵") == []
 
+    def test_modifier_plus_mark_not_a_word(self):
+        assert ipa_mod.find_ipa_words("˥\u0303") == []
+        assert ipa_mod.find_ipa_words("\u0361") == []
+        assert ipa_mod.find_ipa_words("˥.") == []
+        assert ipa_mod.find_ipa_words("ˈ\u203f") == []
+
+    def test_latin_extended_modifier_letters_are_modifiers(self):
+        # Latin Extended-F/G 的 IPA 修饰字母不能当作词基/音节首
+        mod = "\U00010780"
+        assert ipa_mod.find_ipa_words(mod) == []
+        assert ipa_mod.ipa_syllable_onset_offsets(mod + "t") == {1}
+        assert ipa_mod.find_ipa_words("\U00010780t"), "modifier+t 应是 IPA 词"
+        assert get_char_type(mod) == CharType.MODIFIER
+
+    def test_modifier_mark_onset_skips_to_base(self):
+        # ˈ̃ 是重音符+组合附加符簇；onset 必须落在 a（偏移 2），不是附加符
+        assert ipa_mod.ipa_syllable_onset_offsets("ˈ\u0303a") == {2}
+
+    def test_onset_for_modifier_only_is_zero_not_none(self):
+        # 公共 API 不得向调用方泄漏 {None}（_english_word_check_counts 会按
+        # 码点下标使用）。
+        assert ipa_mod.ipa_syllable_onset_offsets("ˈ") == {0}
+        assert ipa_mod.ipa_syllable_onset_offsets("˥˥") == {0}
+        assert None not in ipa_mod.ipa_syllable_onset_offsets("˥\u0303")
+
+    def test_superscript_modifier_letters_trigger_ipa(self):
+        # ʰ ʷ ʲ 等是 IPA 上标修饰字母；只含 ASCII + 它们也应识别为 IPA，
+        # 否则主文字会退回 CJK 字体、自动打轴按英文处理。
+        for text in ("tʰa", "kʷi", "pʲa", "aˀ", "a˪"):
+            assert ipa_mod.has_ipa_text(text) is True, text
+            assert ipa_mod.is_ipa_word(text) is True, text
+            assert ipa_mod.find_ipa_words(text), text
+        assert ipa_mod.find_ipa_words("ʰ") == []
+
     def test_tone_letters_no_checkpoint_no_pause(self):
         # 注：空格前的 se=True 来自通用「空格视为停顿点」规则（对所有字符
         # 生效，非 IPA 特有），因此用例不含空格，只验证词级节奏点/停顿点
@@ -84,8 +118,21 @@ class TestOrthographicSuperscriptsKeepBehavior:
         assert get_char_type("ʻ") == CharType.ALPHABET
         assert get_char_type("ʼ") == CharType.ALPHABET
 
+    def test_dot_does_not_pull_ascii_word_into_ipa(self):
+        # 英文词 + 点号 + IPA：点号不能把 Nice 拖成 IPA 词
+        assert ipa_mod.find_ipa_words("Nice.tʰa") == [(5, 8, "tʰa")]
+        assert ipa_mod.find_ipa_words(".tʰa") == [(1, 4, "tʰa")]
+        # 左侧本身是 IPA/非 ASCII 片段时，点号仍作为音节边界保留
+        assert ipa_mod.find_ipa_words("æk.tʃən") == [(0, 7, "æk.tʃən")]
+        assert ipa_mod.find_ipa_words("k.ʰa") == [(0, 4, "k.ʰa")]
+        # 英文词不能跨进 IPA 范围；只保留点号前的 ASCII 词
+        assert find_english_words("Nice.tʰa") == [
+            (0, 4, "Nice"),
+            (5, 8, "tʰa"),
+        ]
+
     def test_ipa_core_modifiers_still_modifier(self):
-        for ch in ("ˈ", "ˌ", "ː", "ʰ", "ʷ", "˥", "ˤ"):
+        for ch in ("ˈ", "ˌ", "ː", "ʰ", "ʷ", "˥", "ˤ", "ˀ", "ˁ", "˪", "˫"):
             assert get_char_type(ch) == CharType.MODIFIER, ch
 
 
