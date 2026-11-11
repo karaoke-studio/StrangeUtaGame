@@ -16,9 +16,17 @@ from strange_uta_game.backend.domain import graphemes as G  # noqa: E402
 from strange_uta_game.frontend.editor.timing import karaoke_preview as preview_module  # noqa: E402
 
 
+# 持有 QApplication 强引用：模块夹具结束时若销毁 QApplication，其析构会
+# 级联删除 theme 单例，导致后续测试模块构造控件时崩溃（既有测试同型问题，
+# 见 test_karaoke_preview_focus_and_wipe._APP_HOLDER 注释）。
+_APP_HOLDER: list = []
+
+
 @pytest.fixture(scope="module")
 def qapp():
-    return QApplication.instance() or QApplication([])
+    app = QApplication.instance() or QApplication([])
+    _APP_HOLDER.append(app)
+    return app
 
 
 def _project_from(sentences):

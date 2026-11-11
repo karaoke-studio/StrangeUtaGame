@@ -243,3 +243,7 @@ docs/superpowers/
 
 # AI 模型文件（需额外下载，不入库）
 ai_models/
+
+# 本地测试工程/截图（不入库）
+IPA与喀秋莎测试.sug
+IPA与喀秋莎测试_预览.png

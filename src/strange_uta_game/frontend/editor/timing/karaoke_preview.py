@@ -3553,6 +3553,25 @@ class KaraokePreview(QWidget):
             _fm_for_char_ruby, characters, linked_leader_groups, linked_non_leader
         )
 
+        # ---------- 连词框纵向几何（全行统一）----------
+        # 历史行为：框顶/框高一律取字体盒（ruby_y - ascent - 1，height + 2），
+        # 同行所有框高度一致——这是日语注音框的既视感基线。改按逐组墨水后
+        # そう / ふ|た / り 相邻框高低不一（回归，用户报告），IPA 行 ˈgru / ʂɨ
+        # 同理。修复：默认恢复字体盒，仅当**本行**任一注音的墨水越出字体盒
+        # （叠加附加符/声调条）时按行统一扩张——保持「同行同高」。
+        # 先取界（无填充），后统一 ±1 填充：墨水在盒内时结果与历史值逐像素
+        # 相同（-ascent-1 / height-ascent+1），不会因填充把盒内墨水又顶出去。
+        _box_top = -fm_ruby.ascent()
+        _box_bottom = fm_ruby.height() - fm_ruby.ascent()
+        for _ink in char_ruby_ink.values():
+            _box_top = min(_box_top, _ink[2])
+            _box_bottom = max(_box_bottom, _ink[3])
+        for _ink in group_ruby_ink.values():
+            _box_top = min(_box_top, _ink[2])
+            _box_bottom = max(_box_bottom, _ink[3])
+        ruby_frame_top_off = _box_top - 1
+        ruby_frame_bottom_off = _box_bottom + 1
+
         # ---------- 连词组 ruby 的分段 wipe 时间轴 ----------
         # 连词组的 ruby 横跨整个组（如「明日」中「日」无节奏点，与「明」合并重分配
         # 区间）。ruby 的假名边界必须来自各成员**实际打轴的** global_timestamps，
@@ -3642,6 +3661,8 @@ class KaraokePreview(QWidget):
             "group_ruby_ink": group_ruby_ink,
             "char_ruby_is_ipa": char_ruby_is_ipa,
             "group_ruby_is_ipa": group_ruby_is_ipa,
+            "ruby_frame_top_off": ruby_frame_top_off,
+            "ruby_frame_bottom_off": ruby_frame_bottom_off,
             "char_ruby_timed_spans": char_ruby_timed_spans,
             "group_ruby_timed_spans": group_ruby_timed_spans,
             "group_ruby_wipe": group_ruby_wipe,
@@ -4023,6 +4044,11 @@ class KaraokePreview(QWidget):
             _group_ruby_ink = _rd["group_ruby_ink"]
             _char_ruby_is_ipa = _rd.get("char_ruby_is_ipa", {})
             _group_ruby_is_ipa = _rd.get("group_ruby_is_ipa", {})
+            # 连词框纵向几何（全行统一，见 _get_sentence_render_data）
+            _frame_top_off = _rd.get("ruby_frame_top_off", -fm_ruby.ascent() - 1)
+            _frame_bottom_off = _rd.get(
+                "ruby_frame_bottom_off", fm_ruby.height() - fm_ruby.ascent() + 1
+            )
             _char_ruby_timed_spans = _rd["char_ruby_timed_spans"]
             _group_ruby_timed_spans = _rd["group_ruby_timed_spans"]
             _group_ruby_wipe = _rd["group_ruby_wipe"]
@@ -4229,24 +4255,27 @@ class KaraokePreview(QWidget):
                                             _rh_colors, _rh_ink_top, _rh_ink_bottom,
                                         )
                                         painter.restore()
-                        # 连词框：ruby 墨水宽度 vs 字符组墨水宽度取更宽者（同为
-                        # 墨水口径）。字符墨水按绘制位置（格子内居中）计算。
+                        # 连词框：Ruby 拼接串实际总宽 vs 字符组墨水宽度取更宽者
+                        # （历史方法1/方法2 逻辑，保留原口径）。方法2 的字符墨水
+                        # 取**格子左缘 + 墨水偏移**、_cum 累计格子宽——格子宽已含
+                        # 节奏点标记/ruby 的加宽，因此框跟随下方主文字格子（含
+                        # 节奏点占用），不引入格子内居中修正（用户报告：加了居中
+                        # 修正后框贴到字形边缘、不再覆盖 2人 的节奏点占用，是回归）。
                         # --- 方法1：Ruby 拼接串墨水边界 ---
+                        # 比较基准沿用历史口径：**排版宽**（advance）而非墨水宽
+                        # （原代码 _ruby_box_w = ruby_text_w；方法选择的行为不变）
                         _ruby_box_left = _r_ink_x
                         _ruby_box_right = _r_ink_x + _r_ink_w
-                        _ruby_box_w = _r_ink_w
-                        # --- 方法2：字符组墨水边界并集（计入格子内居中偏移）---
+                        _ruby_box_w = ruby_text_w
+                        # --- 方法2：字符组墨水边界并集（格子口径，历史行为）---
                         _char_ink_left = float('inf')
                         _char_ink_right = float('-inf')
                         _cum = 0
                         for _gci in _grp:
-                            _cw = char_widths[_gci]
-                            _adv = char_advances[_gci]
-                            _glyph_x = curr_x + _cum + (_cw - _adv) / 2
-                            _char_ink_x = _glyph_x + _char_ink_offsets[_gci]
+                            _char_ink_x = curr_x + _cum + _char_ink_offsets[_gci]
                             _char_ink_left = min(_char_ink_left, _char_ink_x)
                             _char_ink_right = max(_char_ink_right, _char_ink_x + _char_ink_widths[_gci])
-                            _cum += _cw
+                            _cum += char_widths[_gci]
                         _char_box_w = _char_ink_right - _char_ink_left
                         if _ruby_box_w < _char_box_w:
                             _box_left = int(_char_ink_left)
@@ -4255,11 +4284,14 @@ class KaraokePreview(QWidget):
                             _box_left = int(_ruby_box_left)
                             _box_right = int(_ruby_box_right)
                         _frame_x = _box_left - 2
-                        # 框高按 ruby 真实墨水（含上下附加符），不再用字体级
-                        # ascent/height——叠加附加符（ĩ̯ 一类）会超出字体盒
-                        _frame_y = int(ruby_y + _r_ink_top) - 2
+                        # 框纵向几何**全行统一**（渲染数据缓存）：默认字体盒
+                        # （ruby_y - ascent - 1 / height + 2，历史行为，同行同高），
+                        # 仅当本行任一注音墨水越出字体盒（IPA 叠加附加符/声调条）
+                        # 时按行整体扩张。逐组各用各的墨水会让 そう / ふ|た / り
+                        # 相邻框高低不一（用户报告的回归）。
+                        _frame_y = int(ruby_y + _frame_top_off)
                         _frame_w = (_box_right - _box_left) + 4
-                        _frame_h = int(_r_ink_bottom - _r_ink_top) + 4
+                        _frame_h = int(_frame_bottom_off - _frame_top_off)
                         _frame_color = QColor(base_color)
                         _frame_color.setAlpha(120)
                         painter.save()
