@@ -1819,6 +1819,54 @@ class EditorInterface(QWidget):
 
         self._execute_structural_edit("粘贴内联格式", _mutate_inline)
 
+    def _resolve_copy_ranges(self) -> Optional[list[tuple[int, int, int]]]:
+        """解析复制目标的行内区间列表 [(line_idx, start, end含)]。
+
+        Ctrl+C（富复制）与 Ctrl+Shift+C（纯文本复制）共用的边界语义：
+        - 多行划选：逐行截取（整行范围），跳过越界/空行/空区间
+        - 单行划选：钳制到该行范围
+        - 无划选：仅当前光标单字
+
+        返回 None 表示无可复制目标（调用方静默返回）；多行划选可能返回
+        空列表（所有行都无效），此时仍执行复制（写入空文本），与历史
+        行为一致。
+        """
+        sel = self.preview.get_normalized_selection()
+        if sel is not None and self.preview.is_multi_line_selection():
+            start_line, start_char, end_line, end_char = sel
+            ranges: list[tuple[int, int, int]] = []
+            for line_idx in range(start_line, end_line + 1):
+                if line_idx < 0 or line_idx >= len(self._project.sentences):
+                    continue
+                sentence = self._project.sentences[line_idx]
+                if not sentence.characters:
+                    continue
+                s = start_char if line_idx == start_line else 0
+                e = end_char if line_idx == end_line else len(sentence.characters) - 1
+                if s > e:
+                    continue
+                ranges.append((line_idx, s, e))
+            return ranges
+        if sel is not None:
+            start_line, start_char, _end_line, end_char = sel
+            # 单行划选
+            if start_line < 0 or start_line >= len(self._project.sentences):
+                return None
+            sentence = self._project.sentences[start_line]
+            if not sentence.characters:
+                return None
+            start_char = max(0, min(start_char, len(sentence.characters) - 1))
+            end_char = max(start_char, min(end_char, len(sentence.characters) - 1))
+            return [(start_line, start_char, end_char)]
+        line_idx = self._current_line_idx
+        start = self.preview._current_char_idx
+        if 0 <= line_idx < len(self._project.sentences):
+            sentence = self._project.sentences[line_idx]
+            if sentence.characters and 0 <= start < len(sentence.characters):
+                return [(line_idx, start, start)]
+            return None
+        return None
+
     def _on_copy_chars(self):
         """复制选中字符（Ctrl+C）。
 
@@ -1838,75 +1886,30 @@ class EditorInterface(QWidget):
             self, self.tr("复制字符"), notify=False
         )
 
+        ranges = self._resolve_copy_ranges()
+        if ranges is None:
+            return
+
         id_to_name = {s.id: s.name for s in self._project.singers}
         offset = getattr(self._project, "global_offset_ms", 0) or 0
 
-        sel = self.preview.get_normalized_selection()
-        if sel is not None and self.preview.is_multi_line_selection():
-            start_line, start_char, end_line, end_char = sel
-            line_texts = []
-            total_chars = 0
-            inherited = ""
-            for line_idx in range(start_line, end_line + 1):
-                if line_idx < 0 or line_idx >= len(self._project.sentences):
-                    continue
-                sentence = self._project.sentences[line_idx]
-                if not sentence.characters:
-                    continue
-                s = start_char if line_idx == start_line else 0
-                e = end_char if line_idx == end_line else len(sentence.characters) - 1
-                if s > e:
-                    continue
-                chars = [deepcopy(sentence.characters[i]) for i in range(s, e + 1)]
-                line_text, inherited = sentence_to_timed_line(
-                    chars,
-                    singer_id_to_name=id_to_name,
-                    line_singer_id=sentence.singer_id,
-                    default_singer_id=sentence.singer_id,
-                    inherited_singer_id=inherited,
-                    offset_ms=offset,
-                )
-                line_texts.append(line_text)
-                total_chars += len(chars)
-            inline_text = "\n".join(line_texts)
-        elif sel is not None:
-            start_line, start_char, end_line, end_char = sel
-            # 单行划选
-            if start_line < 0 or start_line >= len(self._project.sentences):
-                return
-            sentence = self._project.sentences[start_line]
-            if not sentence.characters:
-                return
-            start_char = max(0, min(start_char, len(sentence.characters) - 1))
-            end_char = max(start_char, min(end_char, len(sentence.characters) - 1))
-            chars = [deepcopy(sentence.characters[i]) for i in range(start_char, end_char + 1)]
-            inline_text, _ = sentence_to_timed_line(
+        line_texts = []
+        total_chars = 0
+        inherited = ""
+        for line_idx, s, e in ranges:
+            sentence = self._project.sentences[line_idx]
+            chars = [deepcopy(sentence.characters[i]) for i in range(s, e + 1)]
+            line_text, inherited = sentence_to_timed_line(
                 chars,
                 singer_id_to_name=id_to_name,
                 line_singer_id=sentence.singer_id,
                 default_singer_id=sentence.singer_id,
+                inherited_singer_id=inherited,
                 offset_ms=offset,
             )
-            total_chars = len(chars)
-        else:
-            line_idx = self._current_line_idx
-            start = self.preview._current_char_idx
-            if 0 <= line_idx < len(self._project.sentences):
-                sentence = self._project.sentences[line_idx]
-                if sentence.characters and 0 <= start < len(sentence.characters):
-                    chars = [deepcopy(sentence.characters[start])]
-                    inline_text, _ = sentence_to_timed_line(
-                        chars,
-                        singer_id_to_name=id_to_name,
-                        line_singer_id=sentence.singer_id,
-                        default_singer_id=sentence.singer_id,
-                        offset_ms=offset,
-                    )
-                    total_chars = 1
-                else:
-                    return
-            else:
-                return
+            line_texts.append(line_text)
+            total_chars += len(chars)
+        inline_text = "\n".join(line_texts)
 
         clipboard = QApplication.clipboard()
         if clipboard:
@@ -1918,6 +1921,51 @@ class EditorInterface(QWidget):
         InfoBar.success(
             title=self.tr("已复制"),
             content=self.tr("已复制 {n} 个字符").format(n=total_chars),
+            orient=Qt.Orientation.Horizontal,
+            isClosable=True,
+            position=InfoBarPosition.TOP,
+            duration=1500,
+            parent=self,
+        )
+
+    def _on_copy_plain_text(self):
+        """复制选中字符的正文纯文本（Ctrl+Shift+C，固定快捷键）。
+
+        与 Ctrl+C 的富复制相对：仅正文字符，不含注音、节奏点、时间码与
+        演唱者信息，可粘贴到任何位置。使用 setText 整体替换剪贴板
+        MIME 数据——顺带清掉先前富复制留下的自定义 MIME，Ctrl+V 不会
+        把它误识别为内联富内容。
+        """
+        from PyQt6.QtWidgets import QApplication
+
+        if not self._project:
+            return
+
+        EditorInterface._collapse_extended_selection_for_action(
+            self, self.tr("复制纯文本"), notify=False
+        )
+
+        ranges = self._resolve_copy_ranges()
+        if ranges is None:
+            return
+
+        line_texts = []
+        total_chars = 0
+        for line_idx, s, e in ranges:
+            sentence = self._project.sentences[line_idx]
+            line_texts.append(
+                "".join(sentence.characters[i].char for i in range(s, e + 1))
+            )
+            total_chars += e - s + 1
+        plain_text = "\n".join(line_texts)
+
+        clipboard = QApplication.clipboard()
+        if clipboard:
+            clipboard.setText(plain_text)
+
+        InfoBar.success(
+            title=self.tr("已复制"),
+            content=self.tr("已复制纯文本 {n} 个字符").format(n=total_chars),
             orient=Qt.Orientation.Horizontal,
             isClosable=True,
             position=InfoBarPosition.TOP,
@@ -9247,6 +9295,13 @@ class EditorInterface(QWidget):
                 return
             elif key == Qt.Key.Key_V:
                 self._on_paste_lyrics()
+                a0.accept()
+                return
+            elif key == Qt.Key.Key_C and (
+                modifiers & Qt.KeyboardModifier.ShiftModifier
+            ):
+                # Ctrl+Shift+C 固定复制正文纯文本（不含时间码/注音）
+                self._on_copy_plain_text()
                 a0.accept()
                 return
             elif key == Qt.Key.Key_C:

@@ -126,6 +126,7 @@ class ShortcutSubInterface(SubSettingInterface):
         ("redo", FIF.SYNC, "重做", "重做操作", "CTRL+Y:short", "CTRL+Y:short", "both", None, None, True),
         ("save", FIF.SAVE, "保存", "保存项目", "CTRL+S:short", "CTRL+S:short", "both", None, None, True),
         ("copy_chars", FIF.COPY, "复制字符", "复制选中字符的完整信息", "CTRL+C:short", "CTRL+C:short", "both", None, None, True),
+        ("copy_plain_text", FIF.DOCUMENT, "复制纯文本", "复制选中字符的正文文本（不含注音、节奏点、时间码），可粘贴到任何位置", "CTRL+SHIFT+C:short", "CTRL+SHIFT+C:short", "both", None, None, True),
         ("paste_lyrics", FIF.PASTE, "粘贴", "无歌词时粘贴整批歌词文本；已有歌词时在光标处插入（复制的字符或纯文本）", "CTRL+V:short", "CTRL+V:short", "both", None, None, True),
         ("insert_line_break", FIF.RETURN, "插入换行", "在光标处插入换行", "Enter:short", "Enter:short", "both", None, None, True),
         ("merge_line_up", FIF.RETURN, "合并上一行", "将当前行合并到上一行末尾", "Shift+Enter:short", "Shift+Enter:short", "both", None, None, True),
@@ -264,7 +265,7 @@ class ShortcutSubInterface(SubSettingInterface):
         tr("删除所有时间戳"); tr("删除所有时间戳（保留行首）"); tr("删除所选范围时间戳")
         tr("自动生成间奏指引")
         tr("新建项目"); tr("加载项目"); tr("项目另存为"); tr("加载音频"); tr("加载歌词"); tr("多项目拼接")
-        tr("撤销"); tr("重做"); tr("保存"); tr("复制字符")
+        tr("撤销"); tr("重做"); tr("保存"); tr("复制字符"); tr("复制纯文本")
         tr("粘贴"); tr("插入换行"); tr("合并上一行"); tr("删除字符")
         # content
         tr("切换播放和暂停"); tr("停止播放"); tr("停止并从头播放")
@@ -328,6 +329,7 @@ class ShortcutSubInterface(SubSettingInterface):
         tr("为中文歌词自动添加拼音注音"); tr("为韩文歌词按设置风格标注片假名/平假名/罗马音注音")
         tr("撤销操作"); tr("重做操作"); tr("保存项目")
         tr("复制选中字符的完整信息")
+        tr("复制选中字符的正文文本（不含注音、节奏点、时间码），可粘贴到任何位置")
         tr("无歌词时粘贴整批歌词文本；已有歌词时在光标处插入（复制的字符或纯文本）")
         tr("在光标处插入换行"); tr("将当前行合并到上一行末尾")
         tr("删除选中内容或当前字符")
