@@ -150,7 +150,7 @@ class ThemeColors:
     @property
     def timetag_sentence_end(self) -> QColor:
         """句尾/句中停顿结束点，与普通红色轴点区分。"""
-        return QColor("#F2B04C" if self._is_dark else "#D98922")
+        return QColor("#62D98B" if self._is_dark else "#2E9B57")
 
     # ── 卡拉OK专用色 ──
 

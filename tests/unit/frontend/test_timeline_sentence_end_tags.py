@@ -51,7 +51,7 @@ def test_sentence_end_color_shape_warning_and_hit_identity(qtbot, monkeypatch, m
         assert image.pixelColor(300 + corner_x, cy + 2) != warning_fill
         assert image.pixelColor(200, cy + 15) == theme.timetag_sentence_end
         assert image.pixelColor(100, cy + 15) == theme.accent_warning
-        # 倒序点保持原来的警告虚线，不能被橙色覆盖。
+        # 倒序点保持原来的警告虚线，不能被结束点配色覆盖。
         warning_line = {image.pixelColor(300, y).name()
                         for y in range(cy + 10, min(int(lane_top + lane_h * .85), 240))}
         assert theme.timetag_nonmonotonic.name() in warning_line
