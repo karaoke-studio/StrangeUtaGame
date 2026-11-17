@@ -284,7 +284,10 @@ class AutoGuideDialog(QDialog):
         list_actions.addStretch()
         self.select_all_btn = PushButton(self.tr("全选可执行项"), self)
         self.clear_all_btn = PushButton(self.tr("全部取消"), self)
-        self.copy_first_btn = PushButton(self.tr("将第一项设置应用到全部"), self)
+        self.copy_first_btn = PushButton(self.tr("将首个选中项设置应用到所选项"), self)
+        self.copy_first_btn.setToolTip(
+            self.tr("按列表顺序，将第一项勾选候选的设置应用到全部勾选候选；未勾选项不变")
+        )
         list_actions.addWidget(self.select_all_btn)
         list_actions.addWidget(self.clear_all_btn)
         list_actions.addWidget(self.copy_first_btn)
@@ -389,19 +392,20 @@ class AutoGuideDialog(QDialog):
             row.check.setChecked(False)
 
     def _copy_first(self):
-        first = next((row for row in self.rows if row.check.isEnabled()), None)
-        if first is None:
+        selected = [row for row in self.rows if row.check.isEnabled() and row.check.isChecked()]
+        if not selected:
             return
+        first = selected[0]
         params = first.params()
-        for row in self.rows:
-            if row is first:
-                continue
+        for row in selected[1:]:
             row.symbol.setText(params.symbol)
             row.count.setText(str(params.count))
             row.mode.setCurrentIndex(1 if params.fill_gap else 0)
             row.duration.setText(str(params.duration_ms))
             row.reverse.setChecked(params.reverse)
             row.new_line.setChecked(params.new_line)
+            if row.existing_action is not None:
+                row.existing_action.setCurrentIndex(1 if params.existing_action == "append" else 0)
 
     def _emit_execute(self):
         if self._scan_signature != self._project_signature():

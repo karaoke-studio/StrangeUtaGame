@@ -1,3 +1,5 @@
+import pytest
+
 from strange_uta_game.backend.domain import Character, Project, Sentence
 from strange_uta_game.backend.infrastructure.parsers.annotated_text import (
     parse_timed_line,
@@ -30,6 +32,52 @@ def _project(chars):
         char.singer_id = singer_id
     project.sentences = [Sentence(singer_id=singer_id, characters=chars)]
     return project
+
+
+@pytest.mark.parametrize("selected", [(), (2,), (1, 3)])
+def test_copy_settings_uses_first_checked_candidate_only(qtbot, monkeypatch, selected):
+    from types import SimpleNamespace
+    from strange_uta_game.frontend.editor.timing import auto_guide_dialog
+
+    monkeypatch.setattr(auto_guide_dialog, "AppSettings", lambda: SimpleNamespace(
+        get=lambda _key, default=None: default,
+        set=lambda *_args: None,
+        save=lambda: None,
+    ))
+    chars = []
+    for i in range(4):
+        chars.extend([
+            _ch("●", 4000 + i * 5000, guide=True),
+            _ch(str(i), 5000 + i * 5000, end=True, end_ts=6000 + i * 5000, todo=True),
+        ])
+    chars.append(_ch("未打轴", todo=True))
+    dialog = auto_guide_dialog.AutoGuideDialog(_project(chars))
+    qtbot.addWidget(dialog)
+    assert len(dialog.rows) == 5
+    for i, row in enumerate(dialog.rows):
+        row.symbol.setText(f"符{i}")
+        row.count.setText(str(i + 1))
+        row.duration.setText(str(700 + i * 100))
+        row.check.setChecked(i in selected)
+    if selected:
+        source = dialog.rows[selected[0]]
+        source.mode.setCurrentIndex(1)
+        source.reverse.setChecked(True)
+        source.new_line.setChecked(True)
+        source.existing_action.setCurrentIndex(1)
+    # Disabled candidates must be excluded even if still programmatically checked.
+    disabled = dialog.rows[-1]
+    assert not disabled.check.isEnabled()
+    disabled.check.setChecked(True)
+    before = [row.params() for row in dialog.rows]
+    checks = [row.check.isChecked() for row in dialog.rows]
+
+    dialog.copy_first_btn.click()
+
+    for i, row in enumerate(dialog.rows):
+        expected = before[selected[0]] if i in selected else before[i]
+        assert row.params() == expected
+    assert [row.check.isChecked() for row in dialog.rows] == checks
 
 
 def test_scan_uses_continuous_state_and_sentence_end_boundary():
