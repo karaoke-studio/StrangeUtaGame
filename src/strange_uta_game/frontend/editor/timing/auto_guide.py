@@ -6,6 +6,8 @@ from dataclasses import dataclass, field
 
 from strange_uta_game.backend.domain import Character, Sentence
 
+from .guide_timing import beat_duration_ms, guide_times
+
 
 @dataclass
 class AutoGuideParams:
@@ -16,6 +18,7 @@ class AutoGuideParams:
     reverse: bool = False
     new_line: bool = False
     existing_action: str = "replace"  # replace / append
+    bpm: float | None = None
 
 
 @dataclass
@@ -124,6 +127,13 @@ def candidate_preflight(candidate: AutoGuideCandidate, params: AutoGuideParams) 
         return {"executable": False, "reason": "empty_symbol"}
     if params.count < 1:
         return {"executable": False, "reason": "invalid_count"}
+    if params.bpm is not None:
+        try:
+            beat_duration_ms(params.bpm)
+        except (TypeError, ValueError):
+            return {"executable": False, "reason": "invalid_bpm"}
+        if params.fill_gap:
+            return {"executable": False, "reason": "conflicting_modes"}
     if candidate.target_ms is None:
         return {"executable": False, "reason": "missing_target"}
     if params.fill_gap and candidate.left_ms is None:
@@ -137,15 +147,14 @@ def candidate_preflight(candidate: AutoGuideCandidate, params: AutoGuideParams) 
     else:
         duration_ms = max(100, params.duration_ms)
 
-    raw_times = []
-    for i in range(params.count):
-        if params.reverse:
-            raw_times.append(candidate.target_ms - duration_ms * (i + 1))
-        else:
-            raw_times.append(
-                candidate.target_ms - duration_ms * (params.count - i)
-            )
+    raw_times, end_ts = guide_times(
+        candidate.target_ms, params.count, duration_ms, params.reverse, params.bpm,
+    )
     first_time = min(raw_times) if raw_times else candidate.target_ms
+    if params.bpm is not None:
+        first_time = min(first_time, end_ts) if end_ts is not None else first_time
+        if first_time < 0:
+            return {"executable": False, "reason": "before_zero"}
     overrun_ms = (
         max(0, candidate.left_ms - first_time)
         if candidate.left_ms is not None
@@ -158,6 +167,8 @@ def candidate_preflight(candidate: AutoGuideCandidate, params: AutoGuideParams) 
         "first_time_ms": first_time,
         "overrun_ms": overrun_ms,
         "clamped_count": sum(1 for ts in raw_times if ts < 0),
+        "times_ms": raw_times,
+        "end_ts": end_ts,
     }
 
 
@@ -167,7 +178,6 @@ def _build_chars(candidate: AutoGuideCandidate, params: AutoGuideParams) -> list
     check = candidate_preflight(candidate, params)
     if not check["executable"]:
         return []
-    duration_ms = check["duration_ms"]
     result: list[Character] = []
     # 符号按字素簇拆分（emoji＋变体选择符 / 多码点符号是一个字符）
     symbol_units = split_graphemes(params.symbol)
@@ -184,17 +194,14 @@ def _build_chars(candidate: AutoGuideCandidate, params: AutoGuideParams) -> list
                 is_guide=True,
             )
             if first_in_symbol:
-                if params.reverse:
-                    ts = candidate.target_ms - duration_ms * (i + 1)
-                else:
-                    ts = candidate.target_ms - duration_ms * (params.count - i)
+                ts = check["times_ms"][i]
                 new_ch.add_timestamp(max(0, ts))
             result.append(new_ch)
     # 反向导唱的尾部 [>…] 标记：外部渲染软件要求在最后一个导唱字符上
     # 附上停顿点时间戳——继续等差数列再往下推一步（末个导唱时间戳再减
     # 一个间隔 = target_ms - (count+1)*duration），非反向不插入。
     if params.reverse and result:
-        end_ts = max(0, candidate.target_ms - duration_ms * (params.count + 1))
+        end_ts = max(0, check["end_ts"])
         last_ch = result[-1]
         last_ch.is_sentence_end = True
         last_ch.set_sentence_end_ts(end_ts)

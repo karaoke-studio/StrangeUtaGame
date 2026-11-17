@@ -82,6 +82,9 @@ from strange_uta_game.backend.domain import (
 )
 from strange_uta_game.backend.domain.graphemes import split_graphemes
 
+from .guide_bpm import GuideBpmControl
+from .guide_timing import beat_duration_ms, guide_times, previous_lyric_boundary
+
 
 def _get_ruby_split_mode() -> str:
     """获取注音分段方式配置值"""
@@ -697,7 +700,7 @@ def _find_prev_timestamp(sentence, char_idx: int) -> int:
     return 0
 
 
-def _build_guide_chars(sentence, char_idx, symbol, count, duration_ms, reverse):
+def _build_guide_chars(sentence, char_idx, symbol, count, duration_ms, reverse, bpm=None):
     """构建要插入的导唱 Character 列表（不写回 sentence）。
 
     返回 ``(guide_chars, clamped)``，``clamped`` 表示有时间戳被钳到 0。
@@ -708,6 +711,10 @@ def _build_guide_chars(sentence, char_idx, symbol, count, duration_ms, reverse):
     ref_ts = ref_char.timestamps[0] if ref_char.timestamps else None
     clamped = False
     guide_chars = []
+    times, end_ts = (
+        guide_times(ref_ts, count, duration_ms, reverse, bpm)
+        if ref_ts is not None else ([], None)
+    )
     # 符号按字素簇拆分（emoji＋变体选择符 / 多码点符号是一个字符）
     symbol_units = split_graphemes(symbol)
     for i in range(count):
@@ -724,10 +731,7 @@ def _build_guide_chars(sentence, char_idx, symbol, count, duration_ms, reverse):
                 is_guide=True,
             )
             if ref_ts is not None and is_first_of_symbol:
-                if reverse:
-                    ts = ref_ts - duration_ms * (i + 1)
-                else:
-                    ts = ref_ts - duration_ms * (count - i)
+                ts = times[i]
                 if ts < 0:
                     ts = 0
                     clamped = True
@@ -737,7 +741,6 @@ def _build_guide_chars(sentence, char_idx, symbol, count, duration_ms, reverse):
     # 附上停顿点时间戳——继续等差数列再往下推一步（末个导唱时间戳再减
     # 一个间隔 = ref_ts - (count+1)*duration），非反向不插入。
     if reverse and ref_ts is not None and guide_chars:
-        end_ts = ref_ts - duration_ms * (count + 1)
         if end_ts < 0:
             end_ts = 0
             clamped = True
@@ -747,22 +750,46 @@ def _build_guide_chars(sentence, char_idx, symbol, count, duration_ms, reverse):
     return guide_chars, clamped
 
 
-def insert_guide_before(sentence, char_idx, symbol, count, manual_duration_ms, reverse, fill_gap):
+def insert_guide_before(
+    sentence, char_idx, symbol, count, manual_duration_ms, reverse, fill_gap,
+    *, bpm=None, project=None,
+):
     """计算并在 ``char_idx`` 前插入导唱符。不弹任何提示，结果由调用方处理。
 
     返回 dict::
 
         {
             "ok": bool,             # 是否完成插入
-            "reason": None | "no_end_ts" | "invalid_gap",
+            "reason": str | None,  # includes before_zero / invalid_bpm in BPM mode
             "start_ts": int,        # reason=="invalid_gap" 时有意义
             "end_ts": int,          # reason=="invalid_gap" 时有意义
             "inserted": int,        # 插入的字符数
             "clamped": bool,        # 是否有时间戳被钳到 0
+            "overlap_ms": int,      # BPM 模式与前面歌词的重叠量（仅提醒）
         }
     """
     ref_char = sentence.characters[char_idx]
     ref_ts = ref_char.timestamps[0] if ref_char.timestamps else None
+
+    overlap_ms = 0
+    if bpm is not None:
+        if not 1 <= count <= 999:
+            return {"ok": False, "reason": "invalid_count"}
+        try:
+            beat_duration_ms(bpm)
+        except (TypeError, ValueError):
+            return {"ok": False, "reason": "invalid_bpm"}
+        if fill_gap:
+            return {"ok": False, "reason": "conflicting_modes"}
+        if ref_ts is None:
+            return {"ok": False, "reason": "no_end_ts"}
+        times, end = guide_times(ref_ts, count, manual_duration_ms, reverse, bpm)
+        first = min(times + ([end] if end is not None else []))
+        if first < 0:
+            return {"ok": False, "reason": "before_zero"}
+        overlap_ms = max(
+            0, previous_lyric_boundary(sentence, char_idx, project) - first,
+        )
 
     if fill_gap:
         # 补足间隔时间：起点 = 向前最近的时间戳（搜索不到则 0），
@@ -776,10 +803,15 @@ def insert_guide_before(sentence, char_idx, symbol, count, manual_duration_ms, r
     else:
         duration_ms = manual_duration_ms
 
-    guide_chars, clamped = _build_guide_chars(sentence, char_idx, symbol, count, duration_ms, reverse)
+    guide_chars, clamped = _build_guide_chars(
+        sentence, char_idx, symbol, count, duration_ms, reverse, bpm,
+    )
     for idx, gc in enumerate(guide_chars):
         sentence.characters.insert(char_idx + idx, gc)
-    return {"ok": True, "reason": None, "inserted": len(guide_chars), "clamped": clamped}
+    return {
+        "ok": True, "reason": None, "inserted": len(guide_chars),
+        "clamped": clamped, "overlap_ms": overlap_ms,
+    }
 
 
 class InsertGuideSymbolDialog(QDialog):
@@ -809,9 +841,10 @@ class InsertGuideSymbolDialog(QDialog):
 
         saved_reverse = settings.get("timing.guide_reverse", False)
         saved_fill_gap = settings.get("timing.guide_fill_gap", False)
+        saved_bpm_mode = settings.get("timing.guide_use_bpm", False)
 
         self.setWindowTitle(self.tr("插入导唱符"))
-        fit_to_screen(self, 400, 360)
+        fit_to_screen(self, 560, 620)
         self.setFont(ui_font(10))
 
         layout = QVBoxLayout(self)
@@ -842,11 +875,19 @@ class InsertGuideSymbolDialog(QDialog):
         self.edit_duration.setPlaceholderText(self.tr("每个导唱符持续时间（毫秒）"))
         form.addRow(self.tr("持续时间 (ms):"), self.edit_duration)
 
+        self.chk_bpm = CheckBox(self.tr("按 BPM（每个导唱符一拍）"), self)
+        self.chk_bpm.setChecked(bool(saved_bpm_mode))
+        form.addRow("", self.chk_bpm)
+        self.bpm_control = GuideBpmControl(
+            parent, settings.get("timing.guide_bpm", 120.0), self,
+        )
+        form.addRow("", self.bpm_control)
+
         # Field 5: Fill gap — 补足间隔时间
         # 勾选后忽略手动持续时间，自动在「前一个时间戳」与「本字符首个时间戳」
         # 之间平均分配，前一个时间戳搜索不到时以 0ms（歌曲开始）为起点。
         self.chk_fill_gap = CheckBox(self.tr("补足间隔时间"))
-        self.chk_fill_gap.setChecked(bool(saved_fill_gap))
+        self.chk_fill_gap.setChecked(bool(saved_fill_gap) and not saved_bpm_mode)
         self.chk_fill_gap.toggled.connect(self._on_fill_gap_toggled)
         form.addRow("", self.chk_fill_gap)
 
@@ -855,8 +896,18 @@ class InsertGuideSymbolDialog(QDialog):
         self.chk_reverse.setChecked(bool(saved_reverse))
         form.addRow("", self.chk_reverse)
 
+        self.timing_preview = CaptionLabel("", self)
+        self.timing_preview.setWordWrap(True)
+        form.addRow(self.tr("时间预览:"), self.timing_preview)
+        self.chk_bpm.toggled.connect(self._on_bpm_toggled)
+        for edit in (self.edit_count, self.edit_duration):
+            edit.textChanged.connect(self._refresh_timing_preview)
+        self.chk_reverse.toggled.connect(self._refresh_timing_preview)
+        self.bpm_control.value_changed.connect(self._refresh_timing_preview)
+
         # 初始化持续时间输入框可用状态
         self._on_fill_gap_toggled(self.chk_fill_gap.isChecked())
+        self._on_bpm_toggled(self.chk_bpm.isChecked())
 
         layout.addLayout(form)
         layout.addStretch()
@@ -921,7 +972,65 @@ class InsertGuideSymbolDialog(QDialog):
 
     def _on_fill_gap_toggled(self, checked: bool):
         """勾选「补足间隔时间」时禁用手动持续时间输入框"""
-        self.edit_duration.setEnabled(not checked)
+        if checked:
+            self.chk_bpm.setChecked(False)
+        self.edit_duration.setEnabled(not checked and not self.chk_bpm.isChecked())
+        self._refresh_timing_preview()
+
+    def _on_bpm_toggled(self, checked):
+        if checked:
+            self.chk_fill_gap.setChecked(False)
+        self.bpm_control.setVisible(checked)
+        self.edit_duration.setEnabled(not checked and not self.chk_fill_gap.isChecked())
+        if checked:
+            self.bpm_control.activate()
+        else:
+            self.bpm_control.cancel()
+        self._refresh_timing_preview()
+
+    def _refresh_timing_preview(self, *_args):
+        if not self.chk_bpm.isChecked():
+            self.timing_preview.setText(self.tr("按当前持续时间或空档分配导唱符"))
+            return
+        try:
+            count = int(self.edit_count.text())
+            if not 1 <= count <= 999:
+                raise ValueError
+        except ValueError:
+            self.timing_preview.setText(self.tr("请输入 1～999 个导唱符"))
+            return
+        ch = self._sentence.characters[self._char_idx]
+        if not ch.timestamps:
+            self.timing_preview.setText(self.tr("当前字符没有时间戳，无法计算"))
+            return
+        bpm = self.bpm_control.bpm()
+        beat = beat_duration_ms(bpm)
+        times, end = guide_times(
+            ch.timestamps[0], count, 0, self.chk_reverse.isChecked(), bpm,
+        )
+        first = min(times + ([end] if end is not None else []))
+        shown = "、".join(f"{t / 1000:.3f}s" for t in times[:12])
+        if len(times) > 12:
+            shown += self.tr("……")
+        text = self.tr("每拍 {beat:.3f}ms，{n} 拍共 {total:.3f}ms\n{times}").format(
+            beat=beat, n=count, total=count * beat, times=shown,
+        )
+        if end is not None:
+            text += self.tr("\n反向尾标记：{t:.3f}s").format(t=end / 1000)
+        if first < 0:
+            text += self.tr("\n⚠ 时间早于 0 秒，无法插入；批量填充时将跳过此处")
+        else:
+            project = getattr(self.parent(), "_project", None)
+            left = previous_lyric_boundary(self._sentence, self._char_idx, project)
+            if first < left:
+                text += self.tr("\n⚠ 与前面的歌词重叠 {n}ms，仍可插入").format(
+                    n=left - first,
+                )
+        self.timing_preview.setText(text)
+
+    def done(self, result):
+        self.bpm_control.cancel()
+        super().done(result)
 
     def _read_params(self):
         """从输入框读取并校验参数。
@@ -936,6 +1045,13 @@ class InsertGuideSymbolDialog(QDialog):
             count = max(1, int(self.edit_count.text().strip()))
         except ValueError:
             count = 1
+        if self.chk_bpm.isChecked():
+            try:
+                count = int(self.edit_count.text().strip())
+            except ValueError:
+                return None
+            if not 1 <= count <= 999:
+                return None
         reverse = self.chk_reverse.isChecked()
         fill_gap = self.chk_fill_gap.isChecked()
         if fill_gap:
@@ -957,11 +1073,25 @@ class InsertGuideSymbolDialog(QDialog):
             settings.set("timing.guide_duration_ms", manual_duration_ms)
         settings.set("timing.guide_reverse", reverse)
         settings.set("timing.guide_fill_gap", fill_gap)
+        settings.set("timing.guide_use_bpm", self.chk_bpm.isChecked())
+        settings.set("timing.guide_bpm", self.bpm_control.bpm())
         settings.save()
 
     def _warn_insert_failure(self, result):
         """针对 insert_guide_before 失败结果弹出对应提示。"""
         reason = result.get("reason")
+        if reason in ("before_zero", "invalid_bpm", "conflicting_modes"):
+            InfoBar.warning(
+                title=self.tr("无法插入导唱符"),
+                content=(
+                    self.tr("导唱时间早于 0 秒，请减少数量或提高 BPM。")
+                    if reason == "before_zero"
+                    else self.tr("BPM 或时间分配方式无效，请检查设置。")
+                ),
+                orient=Qt.Orientation.Horizontal, isClosable=True,
+                position=InfoBarPosition.TOP, duration=4000, parent=self,
+            )
+            return
         if reason == "no_end_ts":
             InfoBar.warning(
                 title=self.tr("无法补足间隔时间"),
@@ -996,6 +1126,8 @@ class InsertGuideSymbolDialog(QDialog):
         result = insert_guide_before(
             self._sentence, self._char_idx, symbol, count,
             manual_duration_ms, reverse, fill_gap,
+            bpm=self.bpm_control.bpm() if self.chk_bpm.isChecked() else None,
+            project=getattr(self.parent(), "_project", None),
         )
         if not result["ok"]:
             self._warn_insert_failure(result)
@@ -1031,6 +1163,7 @@ class InsertGuideSymbolDialog(QDialog):
             "duration_ms": manual_duration_ms,
             "reverse": reverse,
             "fill_gap": fill_gap,
+            "bpm": self.bpm_control.bpm() if self.chk_bpm.isChecked() else None,
         }
         self._fill_all_requested = True
         self.accept()

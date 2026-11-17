@@ -19,6 +19,7 @@ from qfluentwidgets import (
     CaptionLabel,
     CheckBox,
     ComboBox,
+    DoubleSpinBox,
     LineEdit,
     PrimaryPushButton,
     PushButton,
@@ -36,6 +37,8 @@ from .auto_guide import (
     candidate_preflight,
     scan_auto_guide_candidates,
 )
+from .guide_bpm import GuideBpmControl
+from .guide_timing import beat_duration_ms
 
 
 class AutoGuideCandidateWidget(FluentGroupBox):
@@ -109,7 +112,10 @@ class AutoGuideCandidateWidget(FluentGroupBox):
         self.mode = ComboBox(self)
         self.mode.addItem(self.tr("固定间隔"), userData="fixed")
         self.mode.addItem(self.tr("补足间隔"), userData="fill")
-        self.mode.setCurrentIndex(1 if params.fill_gap else 0)
+        self.mode.addItem(self.tr("按 BPM"), userData="bpm")
+        self.mode.setCurrentIndex(
+            2 if params.bpm is not None else (1 if params.fill_gap else 0)
+        )
         self.mode.setFixedWidth(108)
         controls.addWidget(self.mode)
 
@@ -118,6 +124,12 @@ class AutoGuideCandidateWidget(FluentGroupBox):
         self.duration.setText(str(params.duration_ms))
         self.duration.setFixedWidth(78)
         controls.addWidget(self.duration)
+        self.bpm = DoubleSpinBox(self)
+        self.bpm.setRange(10, 600)
+        self.bpm.setDecimals(2)
+        self.bpm.setValue(params.bpm if params.bpm is not None else 120.0)
+        self.bpm.setFixedWidth(160)
+        controls.addWidget(self.bpm)
         self.unit = CaptionLabel("ms", self)
         controls.addWidget(self.unit)
         controls.addStretch()
@@ -152,6 +164,7 @@ class AutoGuideCandidateWidget(FluentGroupBox):
         self.symbol.textChanged.connect(self._refresh_state)
         self.count.textChanged.connect(self._refresh_state)
         self.duration.textChanged.connect(self._refresh_state)
+        self.bpm.valueChanged.connect(self._refresh_state)
         self.reverse.stateChanged.connect(self._refresh_state)
         self._refresh_state()
 
@@ -169,6 +182,7 @@ class AutoGuideCandidateWidget(FluentGroupBox):
             count=count,
             duration_ms=duration,
             fill_gap=self.mode.currentData() == "fill",
+            bpm=self.bpm.value() if self.mode.currentData() == "bpm" else None,
             reverse=self.reverse.isChecked(),
             new_line=self.new_line.isChecked(),
             existing_action=(
@@ -180,6 +194,10 @@ class AutoGuideCandidateWidget(FluentGroupBox):
 
     def _refresh_state(self, *_args):
         fill = self.mode.currentData() == "fill"
+        use_bpm = self.mode.currentData() == "bpm"
+        self.duration.setVisible(not use_bpm)
+        self.bpm.setVisible(use_bpm)
+        self.unit.setText("BPM" if use_bpm else "ms")
         self.duration.setEnabled(not fill)
         self.unit.setEnabled(not fill)
         check = candidate_preflight(self.candidate, self.params())
@@ -190,6 +208,9 @@ class AutoGuideCandidateWidget(FluentGroupBox):
             "missing_target": self.tr("缺少目标时间戳，暂不可执行"),
             "missing_left": self.tr("补足间隔需要左边界"),
             "invalid_gap": self.tr("左右边界顺序无效"),
+            "invalid_bpm": self.tr("BPM 必须为 10～600"),
+            "conflicting_modes": self.tr("按 BPM 与补足间隔不能同时使用"),
+            "before_zero": self.tr("导唱时间早于 0 秒，将跳过此处；请减少数量或提高 BPM"),
         }
         if not check["executable"]:
             self.warning.setText(messages.get(reason, self.tr("参数无效")))
@@ -198,11 +219,26 @@ class AutoGuideCandidateWidget(FluentGroupBox):
             return
         self.check.setEnabled(True)
         warnings = []
+        if use_bpm:
+            params = self.params()
+            beat = beat_duration_ms(params.bpm)
+            shown = "、".join(_format_ms(t) for t in check["times_ms"][:12])
+            if len(check["times_ms"]) > 12:
+                shown += self.tr("……")
+            warnings.append(
+                self.tr("每拍 {beat:.3f}ms，{n} 拍共 {total:.3f}ms；时间戳：{times}").format(
+                    beat=beat, n=params.count, total=params.count * beat, times=shown,
+                )
+            )
+            if check["end_ts"] is not None:
+                warnings.append(
+                    self.tr("反向尾标记：{time}").format(time=_format_ms(check["end_ts"]))
+                )
         if self.candidate.left_ms is None:
             warnings.append(self.tr("未找到左边界，无法检查越界"))
         if check.get("overrun_ms", 0):
             warnings.append(
-                self.tr("超出左边界 {n}ms").format(n=check["overrun_ms"])
+                self.tr("与前面的歌词重叠 {n}ms，仍可插入").format(n=check["overrun_ms"])
             )
         if check.get("clamped_count", 0):
             warnings.append(
@@ -227,8 +263,8 @@ class AutoGuideDialog(QDialog):
         self.setWindowModality(Qt.WindowModality.NonModal)
         self.setWindowFlag(Qt.WindowType.Tool, True)
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
-        fit_to_screen(self, 620, 640)
-        self.setMinimumSize(520, 420)
+        fit_to_screen(self, 720, 640)
+        self.setMinimumSize(680, 500)
         self.setFont(ui_font(10))
 
         settings = AppSettings()
@@ -245,12 +281,16 @@ class AutoGuideDialog(QDialog):
                 "duration_ms": settings.get("timing.guide_duration_ms", 1000),
                 "fill_gap": settings.get("timing.guide_fill_gap", False),
                 "reverse": settings.get("timing.guide_reverse", False),
+                "bpm": (
+                    settings.get("timing.guide_bpm", 120.0)
+                    if settings.get("timing.guide_use_bpm", False) else None
+                ),
                 "new_line": False,
             }
         self.default_params = AutoGuideParams(**{
             k: auto_saved[k]
             for k in (
-                "symbol", "count", "duration_ms", "fill_gap", "reverse", "new_line"
+                "symbol", "count", "duration_ms", "fill_gap", "reverse", "new_line", "bpm"
             )
             if k in auto_saved
         })
@@ -274,6 +314,13 @@ class AutoGuideDialog(QDialog):
         self.refresh_btn = PushButton(self.tr("重新扫描"), self)
         scan_row.addWidget(self.refresh_btn)
         scan_group.contentLayout.addLayout(scan_row)
+        self.bpm_control = GuideBpmControl(parent, self.default_params.bpm or 120.0, self)
+        scan_group.contentLayout.addWidget(self.bpm_control)
+        self.apply_bpm_btn = PushButton(
+            self.tr("按此 BPM 设置所选候选（每个导唱符一拍）"), self,
+        )
+        self.apply_bpm_btn.clicked.connect(self._apply_bpm)
+        scan_group.contentLayout.addWidget(self.apply_bpm_btn)
         root.addWidget(scan_group)
 
         result_group = FluentGroupBox(self.tr("候选位置"), self)
@@ -325,6 +372,7 @@ class AutoGuideDialog(QDialog):
         self.execute_btn.clicked.connect(self._emit_execute)
         self.close_btn.clicked.connect(self.close)
         self.scan()
+        self.bpm_control.activate()
 
     def scan(self):
         text = self.min_gap.text().strip()
@@ -401,11 +449,29 @@ class AutoGuideDialog(QDialog):
             row.symbol.setText(params.symbol)
             row.count.setText(str(params.count))
             row.mode.setCurrentIndex(1 if params.fill_gap else 0)
+            if params.bpm is not None:
+                row.bpm.setValue(params.bpm)
+            if params.bpm is not None:
+                row.mode.setCurrentIndex(2)
             row.duration.setText(str(params.duration_ms))
             row.reverse.setChecked(params.reverse)
             row.new_line.setChecked(params.new_line)
             if row.existing_action is not None:
                 row.existing_action.setCurrentIndex(1 if params.existing_action == "append" else 0)
+            # Intermediate control changes may temporarily invalidate this row.
+            row.check.setChecked(row.check.isEnabled())
+
+    def _apply_bpm(self):
+        for row in self.rows:
+            if row.check.isChecked():
+                row.bpm.setValue(self.bpm_control.bpm())
+                row.mode.setCurrentIndex(2)
+
+    def before_zero_count(self):
+        return sum(
+            candidate_preflight(row.candidate, row.params()).get("reason") == "before_zero"
+            for row in self.rows
+        )
 
     def _emit_execute(self):
         if self._scan_signature != self._project_signature():
@@ -417,6 +483,11 @@ class AutoGuideDialog(QDialog):
         items = self.selected_items()
         if items:
             self.execute_requested.emit(items)
+        else:
+            before_zero = self.before_zero_count()
+            self.status.setText(
+                self.tr("没有选中可执行项；{n} 处候选导唱早于 0 秒，已跳过。请检查勾选状态、数量和 BPM。").format(n=before_zero)
+            )
 
     def _project_signature(self):
         return tuple(
@@ -450,13 +521,19 @@ class AutoGuideDialog(QDialog):
                 "count": first.count,
                 "duration_ms": first.duration_ms,
                 "fill_gap": first.fill_gap,
+                "bpm": first.bpm,
                 "reverse": first.reverse,
                 "new_line": first.new_line,
             },
         )
         self._settings.save()
 
+    def done(self, result):
+        self.bpm_control.cancel()
+        super().done(result)
+
     def closeEvent(self, event):  # noqa: N802 - Qt virtual method name
+        self.bpm_control.cancel()
         self._settings.set(
             "auto_guide.window_geometry",
             bytes(self.saveGeometry().toHex()).decode("ascii"),

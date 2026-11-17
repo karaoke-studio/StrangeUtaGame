@@ -4273,6 +4273,8 @@ class EditorInterface(QWidget):
         filled = 0
         skipped = 0
         clamped_any = False
+        before_zero = 0
+        overlaps = 0
         for sentence, todo_chars in by_sentence.values():
             # 按当前索引从右往左处理
             ordered = []
@@ -4291,10 +4293,13 @@ class EditorInterface(QWidget):
                 result = insert_guide_before(
                     sentence, idx, params["symbol"], params["count"],
                     params["duration_ms"], params["reverse"], params["fill_gap"],
+                    bpm=params.get("bpm"), project=self._project,
                 )
                 if not result["ok"]:
                     skipped += 1
+                    before_zero += result.get("reason") == "before_zero"
                     continue
+                overlaps += result.get("overlap_ms", 0) > 0
                 c.needs_guide = False
                 filled += 1
                 if result.get("clamped"):
@@ -4303,7 +4308,7 @@ class EditorInterface(QWidget):
         if filled == 0:
             InfoBar.warning(
                 title=self.tr("未填充导唱"),
-                content=self.tr("{n} 个导唱待办均无时间戳锚点或间隔无效，已全部跳过。").format(n=skipped),
+                content=self.tr("{n} 个导唱待办因缺少时间戳、间隔无效或早于 0 秒而跳过（其中 {zero} 处早于 0 秒）。").format(n=skipped, zero=before_zero),
                 orient=Qt.Orientation.Horizontal,
                 isClosable=True,
                 position=InfoBarPosition.TOP,
@@ -4340,7 +4345,11 @@ class EditorInterface(QWidget):
 
         content = self.tr("已填充 {filled} 处导唱。").format(filled=filled)
         if skipped:
-            content += self.tr("{n} 处因缺时间戳/间隔无效被跳过。").format(n=skipped)
+            content += self.tr("{n} 处因缺时间戳、间隔无效或早于 0 秒而跳过。").format(n=skipped)
+        if before_zero:
+            content += self.tr("其中 {n} 处导唱时间早于 0 秒。").format(n=before_zero)
+        if overlaps:
+            content += self.tr("提醒：{n} 处与前面的歌词重叠，已按设置插入。").format(n=overlaps)
         if clamped_any:
             content += self.tr("部分时间戳越界已自动设为0ms。")
         InfoBar.success(
@@ -4727,6 +4736,7 @@ class EditorInterface(QWidget):
             command_manager.execute(cmd)
 
         dialog = getattr(self, "_auto_guide_dialog", None)
+        before_zero = dialog.before_zero_count() if dialog is not None else 0
         if dialog is not None:
             dialog.remember_first_executed(items)
             dialog.close()
@@ -4740,18 +4750,21 @@ class EditorInterface(QWidget):
         if hasattr(self, "_store") and self._store:
             self._store.notify("lyrics")
 
+        content = self.tr(
+            "处理 {positions} 处，新增 {chars} 个字符，替换 {replaced} 处已有导唱，"
+            "清理 {todos} 个待办，跳过 {skipped} 处。"
+        ).format(
+            positions=result["inserted"], chars=result["inserted_chars"],
+            replaced=result["replaced"], todos=result["cleared_todos"],
+            skipped=result["skipped"],
+        )
+        if before_zero:
+            content += self.tr(
+                "候选中另有 {n} 处导唱时间早于 0 秒，未执行且保留待办。"
+            ).format(n=before_zero)
         InfoBar.success(
             title=self.tr("自动导唱完成"),
-            content=self.tr(
-                "处理 {positions} 处，新增 {chars} 个字符，替换 {replaced} 处已有导唱，"
-                "清理 {todos} 个待办，跳过 {skipped} 处。"
-            ).format(
-                positions=result["inserted"],
-                chars=result["inserted_chars"],
-                replaced=result["replaced"],
-                todos=result["cleared_todos"],
-                skipped=result["skipped"],
-            ),
+            content=content,
             orient=Qt.Orientation.Horizontal,
             isClosable=True,
             position=InfoBarPosition.TOP,
