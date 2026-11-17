@@ -2331,6 +2331,7 @@ class WaveformDisplay(QWidget):
         show_ruby = self._tag_ruby_enabled and self._tag_char_enabled
 
         normal_color = theme.accent_warning
+        end_color = theme.timetag_sentence_end
         warn_color = theme.timetag_nonmonotonic
 
         # 双谱两 lane 读同一份 tag 列表：竖线/把手逐 lane 绘制（同步的根源
@@ -2383,7 +2384,8 @@ class WaveformDisplay(QWidget):
 
             # A：只遍历可见窗内的标签（列表已按 ts 排序，二分定位），把每帧 O(N) 降到 O(可见数)
             for tag in self._visible_slice(self._time_tags, visible_start_ms, visible_end_ms):
-                _draw_line(tag, normal_color, 2, line_top, line_bot, False)
+                color = end_color if tag.handle[3] else normal_color
+                _draw_line(tag, color, 2, line_top, line_bot, False)
             for tag in self._visible_slice(self._warning_time_tags, visible_start_ms, visible_end_ms):
                 _draw_line(tag, warn_color, 3, warn_top, warn_bot, True)
 
@@ -2437,10 +2439,20 @@ class WaveformDisplay(QWidget):
                     selected = tag.handle in self._selected_handles
                     half = self._HANDLE_SEL_HALF_W if selected else self._HANDLE_HALF_W
                     rect = QRect(x - half, cy - self._HANDLE_HEIGHT // 2, half * 2, self._HANDLE_HEIGHT)
-                    # 实心色块（选中=蓝，未选中=标签语义色）+ 背景色描边，声谱 lane 描边加宽
+                    # 选中只改填色：结束点保持菱形，普通点保持方块。
+                    # 警告点仍使用时序警告色；声谱 lane 的背景描边加宽。
                     painter.setPen(QPen(theme.waveform_bg, 2 if lane_is_spec else 1))
                     painter.setBrush(QBrush(sel_color if selected else color))
-                    painter.drawRect(rect)
+                    if tag.handle[3]:
+                        half_h = self._HANDLE_HEIGHT / 2
+                        painter.drawPolygon(QPolygonF([
+                            QPointF(x, cy - half_h),
+                            QPointF(x + half, cy),
+                            QPointF(x, cy + half_h),
+                            QPointF(x - half, cy),
+                        ]))
+                    else:
+                        painter.drawRect(rect)
                     self._hit_boxes.append((x, tag.handle, tag.ts, cy))
 
     def _resolve_label_layout(self, labels):

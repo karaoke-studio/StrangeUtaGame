@@ -147,6 +147,11 @@ class ThemeColors:
         """非单调时间戳警告色（时序回退提示）"""
         return QColor("#CC44FF" if self._is_dark else "#9922CC")
 
+    @property
+    def timetag_sentence_end(self) -> QColor:
+        """句尾/句中停顿结束点，与普通红色轴点区分。"""
+        return QColor("#F2B04C" if self._is_dark else "#D98922")
+
     # ── 卡拉OK专用色 ──
 
     @property
