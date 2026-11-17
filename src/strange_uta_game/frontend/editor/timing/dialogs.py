@@ -838,6 +838,7 @@ class InsertGuideSymbolDialog(QDialog):
         saved_symbol = settings.get("timing.guide_symbol", "")
         saved_count = settings.get("timing.guide_count", 1)
         saved_duration = settings.get("timing.guide_duration_ms", 1000)
+        self._manual_duration_text = str(saved_duration)
 
         saved_reverse = settings.get("timing.guide_reverse", False)
         saved_fill_gap = settings.get("timing.guide_fill_gap", False)
@@ -903,7 +904,7 @@ class InsertGuideSymbolDialog(QDialog):
         for edit in (self.edit_count, self.edit_duration):
             edit.textChanged.connect(self._refresh_timing_preview)
         self.chk_reverse.toggled.connect(self._refresh_timing_preview)
-        self.bpm_control.value_changed.connect(self._refresh_timing_preview)
+        self.bpm_control.value_changed.connect(self._on_bpm_value_changed)
 
         # 初始化持续时间输入框可用状态
         self._on_fill_gap_toggled(self.chk_fill_gap.isChecked())
@@ -979,13 +980,26 @@ class InsertGuideSymbolDialog(QDialog):
 
     def _on_bpm_toggled(self, checked):
         if checked:
+            self._manual_duration_text = self.edit_duration.text()
             self.chk_fill_gap.setChecked(False)
+            self._sync_bpm_duration()
+        else:
+            self.edit_duration.setText(self._manual_duration_text)
         self.bpm_control.setVisible(checked)
         self.edit_duration.setEnabled(not checked and not self.chk_fill_gap.isChecked())
         if checked:
             self.bpm_control.activate()
         else:
             self.bpm_control.cancel()
+        self._refresh_timing_preview()
+
+    def _sync_bpm_duration(self):
+        if self.chk_bpm.isChecked():
+            beat = beat_duration_ms(self.bpm_control.bpm())
+            self.edit_duration.setText(f"{beat:.3f}".rstrip("0").rstrip("."))
+
+    def _on_bpm_value_changed(self, _bpm):
+        self._sync_bpm_duration()
         self._refresh_timing_preview()
 
     def _refresh_timing_preview(self, *_args):
@@ -1054,7 +1068,9 @@ class InsertGuideSymbolDialog(QDialog):
                 return None
         reverse = self.chk_reverse.isChecked()
         fill_gap = self.chk_fill_gap.isChecked()
-        if fill_gap:
+        if self.chk_bpm.isChecked():
+            manual_duration_ms = round(beat_duration_ms(self.bpm_control.bpm()))
+        elif fill_gap:
             manual_duration_ms = 0
         else:
             try:
@@ -1070,7 +1086,14 @@ class InsertGuideSymbolDialog(QDialog):
         settings.set("timing.guide_symbol", symbol)
         settings.set("timing.guide_count", count)
         if not fill_gap:
-            settings.set("timing.guide_duration_ms", manual_duration_ms)
+            if self.chk_bpm.isChecked():
+                try:
+                    saved_duration = max(100, int(self._manual_duration_text.strip()))
+                except ValueError:
+                    saved_duration = 1000
+            else:
+                saved_duration = manual_duration_ms
+            settings.set("timing.guide_duration_ms", saved_duration)
         settings.set("timing.guide_reverse", reverse)
         settings.set("timing.guide_fill_gap", fill_gap)
         settings.set("timing.guide_use_bpm", self.chk_bpm.isChecked())

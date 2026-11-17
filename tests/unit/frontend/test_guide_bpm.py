@@ -157,13 +157,14 @@ def _editor(qtbot):
 
 
 @pytest.mark.parametrize("detected", [60, 90, 120, 137, 140, 175, 200])
-def test_detection_requires_selection_and_manual_bpm_stays_until_selected(qtbot, fake_detection, detected):
+def test_detection_fills_bpm_and_keeps_half_original_double_choices(qtbot, fake_detection, detected):
     editor = _editor(qtbot)
     control = guide_bpm.GuideBpmControl(editor, bpm=95, parent=editor)
     control.activate()
     worker, relay = fake_detection[-1]
     relay._finished({"bpm": detected, "confidence": 0.8})
-    assert control.bpm() == 95
+    assert control.bpm() == detected
+    assert control.candidates.currentIndex() == 2
     assert control.candidates.count() == 4
     assert [control.candidates.itemData(i) for i in range(1, 4)] == [detected / 2, detected, detected * 2]
     control.candidates.setCurrentIndex(1)
@@ -201,11 +202,11 @@ def test_completed_candidates_cannot_be_applied_after_changing_audio(qtbot, fake
     fake_detection[-1][1]._finished({"bpm": 120, "confidence": 0.8})
     editor._audio_file_path = "other.wav"
     control.candidates.setCurrentIndex(1)
-    assert control.bpm() == 95
+    assert control.bpm() == 120
     assert control.candidates.currentIndex() == 0
 
 
-def test_real_background_detection_returns_candidates_without_changing_bpm(qtbot):
+def test_real_background_detection_fills_bpm_and_selects_detected_candidate(qtbot):
     editor = _editor(qtbot)
     editor.samples = np.zeros(44_100 * 30, dtype=np.float32)
     pulse = np.hanning(512).astype(np.float32)
@@ -215,9 +216,8 @@ def test_real_background_detection_returns_candidates_without_changing_bpm(qtbot
     control.activate()
     qtbot.waitUntil(lambda: control.candidates.count() > 1, timeout=15_000)
     assert control.candidates.itemData(2) == pytest.approx(120, abs=2)
-    assert control.bpm() == 95
-    control.candidates.setCurrentIndex(2)
     assert control.bpm() == pytest.approx(120, abs=2)
+    assert control.candidates.currentIndex() == 2
     qtbot.waitUntil(lambda: task_runner.running_tasks() == 0, timeout=5000)
 
 
@@ -267,6 +267,50 @@ def test_single_dialog_modes_preview_overlap_and_close_cancels_detection(qtbot, 
     dialog.reject()
     assert worker._cancelled
     assert not dialog.was_modified()
+
+
+def test_single_dialog_interval_tracks_detection_candidate_and_manual_bpm(qtbot, settings, fake_detection):
+    settings["timing.guide_duration_ms"] = 1250
+    editor = _editor(qtbot)
+    editor._project = _project(10_000)
+    dialog = InsertGuideSymbolDialog(editor._project.sentences[0], 0, editor)
+    qtbot.addWidget(dialog)
+    dialog.edit_symbol.setText("●")
+    dialog.edit_count.setText("4")
+    assert dialog.edit_duration.text() == "1250"
+
+    dialog.chk_bpm.click()
+    assert float(dialog.edit_duration.text()) == 500
+    fake_detection[-1][1]._finished({"bpm": 140, "confidence": 0.8})
+    assert dialog.bpm_control.bpm() == 140
+    assert float(dialog.edit_duration.text()) == pytest.approx(60_000 / 140, abs=0.001)
+    assert "428.571ms" in dialog.timing_preview.text()
+
+    for index, bpm in [(1, 70), (3, 280)]:
+        dialog.bpm_control.candidates.setCurrentIndex(index)
+        assert float(dialog.edit_duration.text()) == pytest.approx(60_000 / bpm, abs=0.001)
+    dialog.bpm_control.value.setValue(137)
+    assert float(dialog.edit_duration.text()) == pytest.approx(60_000 / 137, abs=0.001)
+    assert dialog._read_params()[2] == 438
+    dialog._on_fill_all()
+    assert dialog.fill_all_params()["bpm"] == 137
+    assert dialog.fill_all_params()["duration_ms"] == 438
+    assert settings["timing.guide_duration_ms"] == 1250
+
+
+def test_switching_off_bpm_restores_manual_interval(qtbot, settings):
+    dialog = InsertGuideSymbolDialog(_project(10_000).sentences[0], 0)
+    qtbot.addWidget(dialog)
+    dialog.edit_symbol.setText("●")
+    dialog.edit_duration.setText("750")
+    for bpm in (120, 137, 60):
+        dialog.chk_bpm.setChecked(True)
+        dialog.bpm_control.value.setValue(bpm)
+        assert float(dialog.edit_duration.text()) == pytest.approx(60_000 / bpm, abs=0.001)
+        dialog.chk_bpm.setChecked(False)
+        assert dialog.edit_duration.text() == "750"
+        assert dialog.edit_duration.isEnabled()
+    assert dialog._read_params()[2] == 750
 
 
 def test_single_dialog_negative_times_are_not_inserted(qtbot, monkeypatch, settings):

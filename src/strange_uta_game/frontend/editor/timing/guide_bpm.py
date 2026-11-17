@@ -1,4 +1,4 @@
-"""BPM detection and explicit tempo selection shared by guide dialogs."""
+"""BPM detection, automatic filling and tempo alternatives for guide dialogs."""
 
 from __future__ import annotations
 
@@ -36,7 +36,7 @@ class GuideBpmControl(QWidget):
         row.addStretch()
         root.addLayout(row)
         self.candidates = ComboBox(self)
-        self.candidates.addItem(self.tr("检测后请选择 BPM，也可直接手动输入"))
+        self.candidates.addItem(self.tr("检测后自动填入 BPM，也可选择半速或倍速"))
         self.candidates.currentIndexChanged.connect(self._choose)
         root.addWidget(self.candidates)
         self.status = CaptionLabel(self.tr("每个导唱符占一个四分音符"), self)
@@ -92,7 +92,7 @@ class GuideBpmControl(QWidget):
         self.cancel()
         self._attempted = True
         self.candidates.clear()
-        self.candidates.addItem(self.tr("请选择检测结果，也可手动输入 BPM"))
+        self.candidates.addItem(self.tr("检测后自动填入 BPM，也可手动输入"))
         self._source = self._audio_source()
         if self._source is None:
             self.status.setText(self.tr("请先加载音频，或手动输入 BPM"))
@@ -102,7 +102,7 @@ class GuideBpmControl(QWidget):
         worker = BpmDetectWorker(self._source[0], self._source[1])
         self._worker = worker
         self.detect.setText(self.tr("取消检测"))
-        self.status.setText(self.tr("正在检测 BPM…结果需选择后才会应用"))
+        self.status.setText(self.tr("正在检测 BPM…完成后自动填入检测值"))
         task_runner.start_task(
             self, worker, on_finished=self._finished, on_error=self._error,
             is_current=self._is_current,
@@ -130,14 +130,18 @@ class GuideBpmControl(QWidget):
         except (TypeError, ValueError, KeyError):
             self.status.setText(self.tr("未能可靠识别 BPM，请手动输入或重新检测"))
             return
+        detected_index = 0
         for tempo, label in (
             (bpm / 2, self.tr("半速候选")),
             (bpm, self.tr("检测值")),
             (bpm * 2, self.tr("倍速候选")),
         ):
             if 10 <= tempo <= 600:
+                if tempo == bpm:
+                    detected_index = self.candidates.count()
                 self.candidates.addItem(f"{tempo:g} BPM（{label}）", userData=tempo)
-        self.status.setText(self.tr("请选择适合的 BPM；半速和倍速由检测值换算，也可手动修改"))
+        self.candidates.setCurrentIndex(detected_index)
+        self.status.setText(self.tr("已填入检测值；可选择半速或倍速，也可手动修改 BPM"))
 
     def _error(self, _message):
         self._worker = None
