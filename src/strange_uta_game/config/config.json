@@ -38,7 +38,7 @@
     "waveform_rms_enabled": true,
     "disable_click_jump": false,
     "hide_hitbox_highlights": false,
-    "preview_guide_enabled": false,
+    "preview_guide_enabled": true,
     "preview_guide_prev_alpha": 100,
     "preview_guide_curr_alpha": 50,
     "preview_guide_next_alpha": 20,
