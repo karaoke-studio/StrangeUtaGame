@@ -29,6 +29,40 @@ def test_kana_self_reading_gets_ruby_and_romaji():
     assert [ch.check_count for ch in sentence.characters] == [1, 1]
 
 
+@pytest.mark.parametrize(
+    ("text", "reading", "expected"),
+    [
+        ("ｷﾞｬ", "ぎゃ", [["gya"], [], [""]]),
+        ("ﾋﾟｰ", "ぴー", [["pi"], [], ["i"]]),
+    ],
+)
+def test_auto_romaji_of_halfwidth_kana_with_normalized_analyzer_reading(
+    text, reading, expected,
+):
+    analyzer = StaticAnalyzer([RubyResult(text, reading, 0, len(text))])
+    service = AutoCheckService(analyzer, auto_check_flags=ROMAJI_FLAGS)
+    sentence = Sentence.from_text(text, "s1")
+
+    service.apply_to_sentence(sentence)
+
+    assert sentence.text == text
+    assert _ruby_parts(sentence) == expected
+    assert sentence.characters[0].linked_to_next
+    assert sentence.characters[1].check_count == 0
+
+
+def test_auto_romaji_does_not_annotate_standalone_halfwidth_voicing_marks():
+    service = AutoCheckService(DummyAnalyzer(), auto_check_flags=ROMAJI_FLAGS)
+    sentence = Sentence.from_text("(ﾟ∀ﾟ)", "s1")
+
+    service.apply_to_sentence(sentence)
+
+    assert sentence.text == "(ﾟ∀ﾟ)"
+    for index in (1, 3):
+        assert sentence.characters[index].ruby is None
+        assert sentence.characters[index].check_count == 0
+
+
 def test_kanji_gets_romaji_ruby():
     analyzer = StaticAnalyzer([RubyResult(text="今日", reading="きょう", start_idx=0, end_idx=2)])
     service = AutoCheckService(analyzer, auto_check_flags=ROMAJI_FLAGS)

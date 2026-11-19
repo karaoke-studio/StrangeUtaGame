@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import unicodedata
 from dataclasses import dataclass
-from typing import Any, Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Iterable, List, Mapping, NamedTuple, Optional, Sequence, Tuple
 
 _VOWELS = frozenset("aeiou")
 # \u52a9\u8bcd\u8bfb\u97f3\u8986\u76d6\u8868\uff08\u8d6b\u672c\u5f0f\uff09\uff1a\u306f\u2192wa, \u3078\u2192e, \u3092\u2192o\u3002
@@ -28,6 +29,7 @@ _KANA: dict[str, str] = {
     "ら": "ra", "り": "ri", "る": "ru", "れ": "re", "ろ": "ro",
     "わ": "wa", "ゐ": "i", "ゑ": "e", "を": "o",
     "ん": "n", "ゔ": "vu",
+    "ヷ": "va", "ヺ": "vo",
     "ぁ": "a", "ぃ": "i", "ぅ": "u", "ぇ": "e", "ぉ": "o",
     "ゃ": "ya", "ゅ": "yu", "ょ": "yo", "ゎ": "wa",
     "ゕ": "ka", "ゖ": "ke",
@@ -75,6 +77,8 @@ _LINK_DIGRAPH = "digraph"
 _LINK_LONG_VOWEL = "long_vowel"
 _LINK_SOKUON = "sokuon"
 _LINK_SMALL_KANA = "small_kana"
+_LINK_VOICING_MARK = "voicing_mark"
+HALFWIDTH_VOICING_MARKS = frozenset("ﾞﾟ")
 
 
 @dataclass(frozen=True)
@@ -110,11 +114,29 @@ class RomajiOptions:
         )
 
 
+def is_halfwidth_katakana(ch: str) -> bool:
+    """半角片假名和长音符。浊点、半浊点单独处理。"""
+    return len(ch) == 1 and "\uff66" <= ch <= "\uff9d"
+
+
 def _kata_to_hira_char(ch: str) -> str:
+    if not ch:
+        return ""
+    if is_halfwidth_katakana(ch):
+        ch = unicodedata.normalize("NFKC", ch)
     code = ord(ch)
     if 0x30A1 <= code <= 0x30F6:
         return chr(code - 0x60)
     return ch
+
+
+def _compose_voicing_mark(base: str, mark: str) -> str:
+    if len(base) != 1 or _kata_to_hira_char(base) not in _KANA:
+        return ""
+    voiced = unicodedata.normalize("NFKC", base + mark)
+    if len(voiced) == 1 and _kata_to_hira_char(voiced) in _KANA:
+        return voiced
+    return ""
 
 
 def _last_vowel(text: str) -> str:
@@ -154,21 +176,65 @@ def _split_digraph(romaji: str) -> Tuple[str, str]:
     return romaji, ""
 
 
-def _flat_chars(parts: Sequence[str]) -> List[Tuple[int, str]]:
-    return [(part_idx, ch) for part_idx, part in enumerate(parts) for ch in part]
+class _ReadingChar(NamedTuple):
+    part_idx: int
+    char: str
+    last_part_idx: int
 
 
-def _romaji_mora_at(flat: Sequence[Tuple[int, str]], index: int) -> str:
+def _flat_chars(
+    parts: Sequence[str],
+    part_char_indices: Sequence[int] | None,
+) -> tuple[list[_ReadingChar], set[tuple[int, int, str]]]:
+    """合成有效的半角浊音，保留读音首尾所在的原 part。"""
+    flat: list[_ReadingChar] = []
+    links: set[tuple[int, int, str]] = set()
+    for part_idx, part in enumerate(parts):
+        for ch in part:
+            if flat and part_char_indices is not None:
+                previous = flat[-1]
+                if (
+                    part_char_indices[part_idx]
+                    > part_char_indices[previous.last_part_idx] + 1
+                    and (
+                        is_halfwidth_katakana(ch)
+                        or any(
+                            is_halfwidth_katakana(raw)
+                            for raw in parts[previous.part_idx]
+                        )
+                    )
+                ):
+                    # 未注音的正文字符隔开了两个假名，保留这个边界。
+                    flat.append(_ReadingChar(part_idx, "", part_idx))
+            if ch in HALFWIDTH_VOICING_MARKS and flat:
+                previous = flat[-1]
+                last_part = previous.last_part_idx
+                # Ruby 列表会跳过没有注音的字，不能隔着正文符号合成浊音。
+                if part_idx <= last_part + 1 and (
+                    part_char_indices is None
+                    or part_char_indices[part_idx] <= part_char_indices[last_part] + 1
+                ):
+                    voiced = _compose_voicing_mark(previous.char, ch)
+                    if voiced:
+                        flat[-1] = _ReadingChar(previous.part_idx, voiced, part_idx)
+                        if last_part != part_idx:
+                            links.add((last_part, part_idx, _LINK_VOICING_MARK))
+                        continue
+            flat.append(_ReadingChar(part_idx, ch, part_idx))
+    return flat, links
+
+
+def _romaji_mora_at(flat: Sequence[_ReadingChar], index: int) -> str:
     if index >= len(flat):
         return ""
-    _, ch = flat[index]
+    ch = flat[index].char
     hira = _kata_to_hira_char(ch)
-    if hira in ("っ", "ー"):
+    if not hira or hira in ("っ", "ー") or ch in HALFWIDTH_VOICING_MARKS:
         return ""
     if hira == "ん":
         return "n"
     if index + 1 < len(flat):
-        _, next_ch = flat[index + 1]
+        next_ch = flat[index + 1].char
         pair = hira + _kata_to_hira_char(next_ch)
         if pair in _DIGRAPHS:
             return _DIGRAPHS[pair]
@@ -181,25 +247,30 @@ def _romanize_ruby_parts_with_ownership(
     *,
     for_alignment: bool = False,
     options: Optional[RomajiOptions] = None,
+    part_char_indices: Sequence[int] | None = None,
 ) -> tuple[list[str], set[tuple[int, int, str]]]:
     """转换 RubyPart，并返回跨 part 的字符链接候选。
 
     候选中的 ``(lead_part, next_part, kind)`` 直接来自转换器命中的拗音、
-    长音、促音或大小假名规则，供句子级转换结合原歌词 Character 类型决定是否
+    浊音、长音、促音或大小假名规则，供句子级转换结合原歌词 Character 类型决定是否
     链接。它不根据转换后的空字符串反推，因此不会把普通空 part 误认为被吸收
     的字符。
     """
     options = options or RomajiOptions()
     source = list(parts)
     result = ["" for _ in source]
-    link_candidates: set[tuple[int, int, str]] = set()
-    flat = _flat_chars(source)
+    flat, link_candidates = _flat_chars(source, part_char_indices)
     particle_set = set(particle_indices or ())
     prev_vowel = ""
     index = 0
 
     while index < len(flat):
-        part_idx, ch = flat[index]
+        part_idx, ch, last_part_idx = flat[index]
+        if not ch or ch in HALFWIDTH_VOICING_MARKS:
+            result[part_idx] += ch
+            prev_vowel = ""
+            index += 1
+            continue
         hira = _kata_to_hira_char(ch)
 
         if (
@@ -217,7 +288,8 @@ def _romanize_ruby_parts_with_ownership(
             next_romaji = _romaji_mora_at(flat, index + 1)
             prefix = _geminate_prefix(next_romaji, for_alignment=for_alignment)
             if prefix and index + 1 < len(flat):
-                next_part_idx, _ = flat[index + 1]
+                following = flat[index + 1]
+                next_part_idx = following.part_idx
                 # 促音独立成拍、读后字辅音——ま|っ|て -> ma/t/te。促音
                 # part 若只剩空 token，打轴/对齐拿不到独立区间，时间轴
                 # 会与后字重合
@@ -230,16 +302,16 @@ def _romanize_ruby_parts_with_ownership(
                 prev_vowel = _last_vowel(next_romaji)
                 index += 2
                 if index < len(flat):
-                    small_part_idx, maybe_small = flat[index]
+                    small_part_idx, maybe_small, _ = flat[index]
                     pair = (
-                        _kata_to_hira_char(flat[index - 1][1])
+                        _kata_to_hira_char(following.char)
                         + _kata_to_hira_char(maybe_small)
                     )
                     if pair in _DIGRAPHS:
-                        if next_part_idx != small_part_idx:
+                        if following.last_part_idx != small_part_idx:
                             link_candidates.add(
                                 (
-                                    next_part_idx,
+                                    following.last_part_idx,
                                     small_part_idx,
                                     _LINK_DIGRAPH,
                                 )
@@ -253,17 +325,21 @@ def _romanize_ruby_parts_with_ownership(
             continue
 
         if hira == "ー":
-            previous_part_idx = flat[index - 1][0] if index > 0 else None
+            previous = flat[index - 1] if index > 0 else None
+            if previous is not None and (
+                not previous.char or previous.char in HALFWIDTH_VOICING_MARKS
+            ):
+                previous = None
             if options.repeat_long_vowels:
                 repeated = prev_vowel or "-"
                 result[part_idx] += repeated
                 prev_vowel = repeated if repeated in _VOWELS else ""
-            elif prev_vowel and previous_part_idx is not None:
+            elif prev_vowel and previous is not None:
                 # ``キャ|ー`` 等情况下，紧邻长音的 part 可能是已被拗音吸收的
                 # 空 part；连字符仍应附到实际承载该拍罗马音的前导 part。
-                anchor_part_idx = previous_part_idx
+                anchor_part_idx = previous.part_idx
                 for previous_index in range(index - 1, -1, -1):
-                    candidate_part_idx = flat[previous_index][0]
+                    candidate_part_idx = flat[previous_index].part_idx
                     if result[candidate_part_idx]:
                         anchor_part_idx = candidate_part_idx
                         break
@@ -273,11 +349,11 @@ def _romanize_ruby_parts_with_ownership(
                 prev_vowel = ""
             if (
                 options.effective_link_long_vowels
-                and previous_part_idx is not None
-                and previous_part_idx != part_idx
+                and previous is not None
+                and previous.last_part_idx != part_idx
             ):
                 link_candidates.add(
-                    (previous_part_idx, part_idx, _LINK_LONG_VOWEL)
+                    (previous.last_part_idx, part_idx, _LINK_LONG_VOWEL)
                 )
             index += 1
             continue
@@ -291,16 +367,16 @@ def _romanize_ruby_parts_with_ownership(
             continue
 
         if index + 1 < len(flat):
-            next_part_idx, next_ch = flat[index + 1]
+            next_part_idx, next_ch, _ = flat[index + 1]
             pair = hira + _kata_to_hira_char(next_ch)
             digraph = _DIGRAPHS.get(pair)
             if digraph is not None:
                 # A digraph is one mora.  Store it on its leading part even
                 # when the small kana lives in the next RubyPart.
                 result[part_idx] += digraph
-                if part_idx != next_part_idx:
+                if last_part_idx != next_part_idx:
                     link_candidates.add(
-                        (part_idx, next_part_idx, _LINK_DIGRAPH)
+                        (last_part_idx, next_part_idx, _LINK_DIGRAPH)
                     )
                 prev_vowel = _last_vowel(digraph)
                 index += 2
@@ -311,12 +387,12 @@ def _romanize_ruby_parts_with_ownership(
                 and hira in _KANA
                 and hira not in _SMALL_KANA
                 and _kata_to_hira_char(next_ch) in _SMALL_KANA
-                and part_idx != next_part_idx
+                and last_part_idx != next_part_idx
             ):
                 # 非拗音组合也保留小假名自己的罗马音与时间点，仅建立字符链接。
                 # 例如 あ|ぁ -> a(link)|a。
                 link_candidates.add(
-                    (part_idx, next_part_idx, _LINK_SMALL_KANA)
+                    (last_part_idx, next_part_idx, _LINK_SMALL_KANA)
                 )
 
         romaji = _KANA.get(hira, ch)
@@ -367,7 +443,7 @@ def romanize_ruby_parts(
 
 def is_self_romanizable_kana(char: str) -> bool:
     """单字符是否为可自注音的假名（平假名/片假名/促音/长音）。"""
-    if len(char) != 1:
+    if len(char) != 1 or char in HALFWIDTH_VOICING_MARKS:
         return False
     from strange_uta_game.backend.infrastructure.parsers.text_splitter import (
         CharType,
@@ -454,6 +530,49 @@ def detect_particle_part_indices(sentence) -> set:
     return particle_indices
 
 
+def _halfwidth_source_reading(characters, index: int, reading: str) -> str:
+    """还原引擎挂在首字的半角假名组合，让各原字符进入转换。"""
+    base = characters[index].char
+    if not is_halfwidth_katakana(base) or reading == base:
+        return reading
+
+    next_idx = index + 1
+    hira = _kata_to_hira_char(base)
+    if next_idx < len(characters):
+        mark = characters[next_idx]
+        if mark.char in HALFWIDTH_VOICING_MARKS and (
+            mark.ruby is None or [p.text for p in mark.ruby.parts] == [mark.char]
+        ):
+            voiced = _compose_voicing_mark(base, mark.char)
+            if voiced:
+                hira = _kata_to_hira_char(voiced)
+                next_idx += 1
+
+    normalized = "".join(
+        _kata_to_hira_char(ch) for ch in unicodedata.normalize("NFKC", reading)
+    )
+    if next_idx > index + 1 and normalized == hira:
+        return base
+    if next_idx < len(characters):
+        next_char = characters[next_idx]
+        if (
+            len(next_char.char) == 1
+            and next_char.ruby
+            and len(next_char.ruby.parts) == 1
+        ):
+            next_hira = _kata_to_hira_char(next_char.char)
+            pair = hira + next_hira
+            next_reading = next_char.ruby.parts[0].text
+            if (
+                (pair in _DIGRAPHS or (next_hira == "ー" and hira in _KANA))
+                and normalized == pair
+                and len(next_reading) == 1
+                and _kata_to_hira_char(next_reading) == next_hira
+            ):
+                return base
+    return reading
+
+
 def romanize_sentence_in_place(
     sentence,
     *,
@@ -470,21 +589,39 @@ def romanize_sentence_in_place(
     part_char_indices = []
     for char_idx, ch in enumerate(sentence.characters):
         if not ch.ruby:
+            if char_idx and ch.char in HALFWIDTH_VOICING_MARKS:
+                # 正文浊点只附在前字的自读音上，不给它创建 RubyPart 或节奏点。
+                base = sentence.characters[char_idx - 1]
+                if (
+                    base.ruby
+                    and len(base.ruby.parts) == 1
+                    and len(texts[-1]) == 1
+                    and _compose_voicing_mark(base.char, ch.char)
+                    and _kata_to_hira_char(texts[-1]) == _kata_to_hira_char(base.char)
+                ):
+                    texts.append(ch.char)
+                    part_char_indices.append(char_idx)
             continue
         for part in ch.ruby.parts:
-            refs.append(part)
-            texts.append(part.text)
+            refs.append((len(texts), part))
+            reading = part.text
+            if len(ch.ruby.parts) == 1:
+                reading = _halfwidth_source_reading(
+                    sentence.characters, char_idx, reading
+                )
+            texts.append(reading)
             part_char_indices.append(char_idx)
     if not refs:
         return
-    particle_indices = detect_particle_part_indices(sentence)
+    particle_indices = {refs[i][0] for i in detect_particle_part_indices(sentence)}
     converted, link_candidates = _romanize_ruby_parts_with_ownership(
         texts,
         particle_indices=particle_indices,
         options=options,
+        part_char_indices=part_char_indices,
     )
-    for part, text in zip(refs, converted):
-        part.text = text
+    for part_idx, part in refs:
+        part.text = converted[part_idx]
     for lead_part_idx, consumed_part_idx, link_kind in link_candidates:
         lead_char_idx = part_char_indices[lead_part_idx]
         consumed_char_idx = part_char_indices[consumed_part_idx]
@@ -501,15 +638,20 @@ def romanize_sentence_in_place(
 
             # 只允许歌词正文中的 ``っ/ッ`` 链接到下一个假名。汉字 Ruby 内的
             # 促音（如 一体），以及 ``っ`` 后接汉字（如 真っ直ぐ）均不链接。
-            if lead_char.char not in ("っ", "ッ"):
+            if lead_char.char not in ("っ", "ッ", "ｯ"):
                 continue
             if len(consumed_char.char) != 1 or get_char_type(
                 consumed_char.char
             ) not in (CharType.HIRAGANA, CharType.KATAKANA):
                 continue
-        elif link_kind == _LINK_LONG_VOWEL and consumed_char.char != "ー":
-            # 只认日文长音符 U+30FC；不把 OCR 误识别的汉字「一」等当成长音。
+        elif link_kind == _LINK_LONG_VOWEL and consumed_char.char not in ("ー", "ｰ"):
+            # 只认全角、半角日文长音符。
             continue
+        elif link_kind == _LINK_VOICING_MARK:
+            if consumed_char.char not in HALFWIDTH_VOICING_MARKS or not (
+                _compose_voicing_mark(lead_char.char, consumed_char.char)
+            ):
+                continue
         elif link_kind == _LINK_SMALL_KANA:
             from strange_uta_game.backend.infrastructure.parsers.text_splitter import (
                 CharType,
@@ -522,8 +664,8 @@ def romanize_sentence_in_place(
                 len(lead_char.char) != 1
                 or get_char_type(lead_char.char)
                 not in (CharType.HIRAGANA, CharType.KATAKANA)
-                or consumed_char.char
-                not in "ぁぃぅぇぉゃゅょゎゕゖァィゥェォャュョヮヵヶ"
+                or len(consumed_char.char) != 1
+                or _kata_to_hira_char(consumed_char.char) not in _SMALL_KANA
             ):
                 continue
 

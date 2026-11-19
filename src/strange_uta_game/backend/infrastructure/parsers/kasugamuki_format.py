@@ -27,7 +27,9 @@ from strange_uta_game.backend.infrastructure.parsers.inline_format import (
     parse_timestamp,
 )
 from strange_uta_game.backend.infrastructure.parsers.romaji import (
+    HALFWIDTH_VOICING_MARKS,
     RomajiOptions,
+    is_halfwidth_katakana,
     romanize_sentence_to_self_ruby,
 )
 
@@ -605,6 +607,18 @@ def sentence_to_kasugamuki_romaji(
         for i, ch in enumerate(effective_chars)
         if ch.ruby
     }
+    for i in range(1, len(chars)):
+        ch = chars[i]
+        # 一拍中被吸收的半角字符可能已有单独时间戳。缺少假名注音层时，
+        # 保留该字的正文时间标签，避免导出的罗马音块吞掉它。
+        if (
+            effective_chars[i - 1].linked_to_next
+            and (ch.char in HALFWIDTH_VOICING_MARKS or is_halfwidth_katakana(ch.char))
+            and not ch.ruby
+            and _get_ts_list(ch)
+            and not any(romaji_by_char.get(i, []))
+        ):
+            effective_chars[i - 1].linked_to_next = False
 
     segments: List[Tuple[str, bool]] = []
     i = 0
@@ -640,6 +654,9 @@ def sentence_to_kasugamuki_romaji(
                 and not chars[mora_end].ruby
                 and _is_kana_text(chars[mora_end].char)
                 and chars[mora_end].char not in ("っ", "ッ")
+                and chars[mora_end].char not in HALFWIDTH_VOICING_MARKS
+                # 半角假名已有明确的归属链接，不靠空读音推断。
+                and not is_halfwidth_katakana(chars[mora_end].char)
                 and not any(romaji_by_char.get(mora_end, []))
             ):
                 mora_end += 1

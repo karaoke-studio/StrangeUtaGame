@@ -298,3 +298,61 @@ def test_katakana_self_ruby():
     sent = Sentence.from_text("カナ", "s1")
     romanize_project_to_self_ruby(_project(sent))
     assert _parts(sent) == [["ka"], ["na"]]
+
+
+def test_halfwidth_voiced_mora_owns_the_reading_and_keeps_original_checkpoints():
+    sentence = Sentence.from_text("ｷﾞｬ(ﾟ∀ﾟ)", "s1")
+    sentence.characters[1].add_timestamp(200)
+    for index in (4, 6):
+        sentence.characters[index].set_check_count(0)
+    counts = [c.check_count for c in sentence.characters]
+    project = _project(sentence)
+
+    assert romanize_project_to_self_ruby(project) == 1
+
+    assert sentence.text == "ｷﾞｬ(ﾟ∀ﾟ)"
+    assert _parts(sentence) == [["gya"], [], [""], [], [], [], [], []]
+    assert [c.linked_to_next for c in sentence.characters] == [
+        True, True, False, False, False, False, False, False,
+    ]
+    assert [c.check_count for c in sentence.characters] == counts
+    assert sentence.characters[1].timestamps == [200]
+    assert romanize_project_to_self_ruby(project) == 0
+
+
+def test_halfwidth_kana_do_not_combine_across_unannotated_symbols():
+    sentence = Sentence.from_text("ｷ(ｬ)ｶ(ﾞ)", "s1")
+
+    romanize_project_to_self_ruby(_project(sentence))
+
+    assert _parts(sentence) == [["ki"], [], ["ya"], [], ["ka"], [], [], []]
+    assert not any(c.linked_to_next for c in sentence.characters)
+
+
+def test_halfwidth_kana_with_precomposed_ruby_does_not_repeat_small_kana():
+    sentence = Sentence.from_text("ｷﾞｬ", "s1")
+    sentence.characters[0].set_ruby(Ruby(parts=[RubyPart(text="ぎゃ")]))
+
+    romanize_project_to_self_ruby(_project(sentence))
+
+    assert _parts(sentence) == [["gya"], [], [""]]
+    assert [c.linked_to_next for c in sentence.characters] == [True, True, False]
+
+
+def test_halfwidth_long_vowel_with_precomposed_ruby_is_repeated_once():
+    sentence = Sentence.from_text("ﾋﾟｰ", "s1")
+    sentence.characters[0].set_ruby(Ruby(parts=[RubyPart(text="ぴー")]))
+
+    romanize_project_to_self_ruby(_project(sentence))
+
+    assert _parts(sentence) == [["pi"], [], ["i"]]
+
+
+def test_unannotated_halfwidth_mark_does_not_change_custom_ruby():
+    sentence = Sentence.from_text("ｶﾞ", "s1")
+    sentence.characters[0].set_ruby(Ruby(parts=[RubyPart(text="かた")]))
+
+    romanize_project_to_self_ruby(_project(sentence))
+
+    assert _parts(sentence) == [["kata"], []]
+    assert not any(c.linked_to_next for c in sentence.characters)
