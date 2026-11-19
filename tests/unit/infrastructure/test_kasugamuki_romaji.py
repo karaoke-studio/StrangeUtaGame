@@ -64,6 +64,36 @@ def test_export_keeps_digraph_in_one_romaji_annotation():
     assert sentence_to_kasugamuki_romaji(sentence) == "{きゃ|>kya}"
 
 
+def test_halfwidth_kana_export_uses_original_glyphs_and_romaji_options():
+    sentence = Sentence.from_text("ｷﾞｬﾏｯﾁｬﾋﾟｰ(ﾟ∀ﾟ)", "s1")
+    options = RomajiOptions(
+        repeat_long_vowels=False, link_sokuon=True, uppercase=True
+    )
+
+    assert sentence_to_kasugamuki_romaji(sentence, options=options) == (
+        "{ｷﾞｬ|>GYA}{ﾏ|>MA}{ｯﾁｬ|>CCHA}{ﾋﾟｰ|>PI-}(ﾟ∀ﾟ)"
+    )
+    assert not any(ch.ruby or ch.linked_to_next for ch in sentence.characters)
+
+
+@pytest.mark.parametrize("prelinked", [False, True])
+def test_halfwidth_kana_export_keeps_independent_timestamp_on_absorbed_character(
+    prelinked,
+):
+    sentence = Sentence.from_text("ｷﾞｬ", "s1")
+    for index, character in enumerate(sentence.characters, start=1):
+        character.add_timestamp(index * 100)
+    for character in sentence.characters[:-1]:
+        character.linked_to_next = prelinked
+
+    assert sentence_to_kasugamuki_romaji(sentence) == (
+        "{ｷ|>[00:00:10]gya}[00:00:20]ﾞ[00:00:30]ｬ"
+    )
+    assert [ch.linked_to_next for ch in sentence.characters] == [
+        prelinked, prelinked, False,
+    ]
+
+
 @pytest.mark.parametrize(
     ("options", "expected"),
     [

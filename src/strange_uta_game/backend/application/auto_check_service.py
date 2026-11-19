@@ -54,8 +54,10 @@ from strange_uta_game.backend.infrastructure.parsers.e2k_engine import (
     EnglishToKanaEngine,
 )
 from strange_uta_game.backend.infrastructure.parsers.romaji import (
+    HALFWIDTH_VOICING_MARKS,
     RomajiOptions,
     detect_particle_part_indices,
+    is_halfwidth_katakana,
     is_self_romanizable_kana,
     romanize_sentence_in_place,
 )
@@ -1285,6 +1287,11 @@ class AutoCheckService:
             if i >= len(check_counts):
                 break
 
+            if self._romanize_ruby and char in HALFWIDTH_VOICING_MARKS:
+                # 成音的浊点依附前字，独立标记也没有默认读音拍。
+                check_counts[i] = 0
+                continue
+
             ct = get_char_type(char) if len(char) == 1 else CharType.OTHER
 
             # 空格：主开关 + 上下文子选项共同决定是否打 CP（set-to-1 语义）
@@ -2479,6 +2486,18 @@ class AutoCheckService:
             # Stage 0: result.ruby 为 List[str]（来自 _group_reading_for_character），
             # 映射为 Ruby(parts=[RubyPart(text=s), ...])。
             ruby_groups = result.ruby  # List[str] | None
+            if self._romanize_ruby:
+                # 注音引擎可能把 ｷﾞｬ 的读音整段挂到 ｷ。半角假名的自注音
+                # 交给罗马音转换器按原字分配，避免重复转换后续假名。
+                if result.origin_source == "fallback" and is_halfwidth_katakana(
+                    result.char
+                ):
+                    ruby_groups = [result.char]
+                elif result.char in HALFWIDTH_VOICING_MARKS:
+                    if ruby_groups == [result.char]:
+                        ruby_groups = None
+                    if keep_existing_timetags:
+                        check_count = max(check_count, len(old_timestamps.get(i, ())))
             _is_long_vowel_char = get_char_type(result.char) == CharType.LONG_VOWEL
             if ruby_groups and (
                 self._romanize_ruby

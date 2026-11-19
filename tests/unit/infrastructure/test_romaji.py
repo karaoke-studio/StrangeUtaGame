@@ -1,9 +1,30 @@
 """纯转换器测试：不依赖 Sentence/Character，只测 romanize_ruby_parts。"""
 
+import pytest
+
 from strange_uta_game.backend.infrastructure.parsers.romaji import (
     RomajiOptions,
     romanize_ruby_parts,
 )
+
+
+@pytest.mark.parametrize(
+    ("parts", "expected"),
+    [
+        (["ｶﾞ", "ﾊﾟ", "ﾜﾞ", "ｦﾞ"], ["ga", "pa", "va", "vo"]),
+        (["ｷ", "ﾞ", "ｬ"], ["gya", "", ""]),
+        (["ｯ", "ｷ", "ﾞ", "ｬ"], ["g", "gya", "", ""]),
+        (["ﾋ", "ﾟ", "ｰ"], ["pi", "", "i"]),
+        (["ﾝ", "ﾔ", "ｯ", "ﾞ"], ["n'", "ya", "xtsu", "ﾞ"]),
+        (["ｶ", "ﾟ", "ｰ"], ["ka", "ﾟ", "-"]),
+        (
+            ["Ａ①｡｢｣､･(ﾟ∀ﾟ)", "ｷ", "ﾟ", "ｬ"],
+            ["Ａ①｡｢｣､･(ﾟ∀ﾟ)", "ki", "ﾟ", "ya"],
+        ),
+    ],
+)
+def test_halfwidth_katakana_preserves_reading_part_ownership(parts, expected):
+    assert romanize_ruby_parts(parts) == expected
 
 
 class TestBasicKana:
